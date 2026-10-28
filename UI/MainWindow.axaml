@@ -1,0 +1,762 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:EchoMusic.UI"
+        x:Class="EchoMusic.UI.MainWindow"
+        Title="Echo Music"
+        Width="1280" Height="760"
+        MinWidth="420" MinHeight="140"
+        WindowStartupLocation="CenterScreen"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="NoChrome"
+        ExtendClientAreaTitleBarHeightHint="38"
+        Background="{DynamicResource BgRootBrush}"
+        Foreground="{DynamicResource TextPrimaryBrush}"
+        Icon="/Assets/echo.ico">
+
+  <Window.Styles>
+    <Style Selector="Button.ghost">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+      <Setter Property="Padding" Value="7,6"/>
+      <Setter Property="CornerRadius" Value="999"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+
+    <Style Selector="Button.topNavCircle">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+      <Setter Property="Width" Value="32"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="CornerRadius" Value="16"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.topNavCircle:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+    <Style Selector="Button.titlebarButton">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+      <Setter Property="Width" Value="38"/>
+      <Setter Property="Height" Value="30"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.titlebarButton:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+    <Style Selector="Button.titlebarClose:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#E81123"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+
+    <Style Selector="Button.navItem">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+      <Setter Property="HorizontalAlignment" Value="Stretch"/>
+      <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="Padding" Value="12,9"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.navItem:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource BgCardBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+    <Style Selector="Button.navActive">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+
+    <Style Selector="Button.rpanelTab">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+      <Setter Property="Padding" Value="8,5"/>
+      <Setter Property="CornerRadius" Value="6"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.rpanelTab:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource BgCardBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+    <Style Selector="Button.rpanelTabActive">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+    </Style>
+
+    <Style Selector="Button.pill">
+      <Setter Property="Background" Value="{DynamicResource BgCardBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="14,6"/>
+      <Setter Property="CornerRadius" Value="999"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="FontWeight" Value="Medium"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.pill:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="{DynamicResource BgHoverBrush}"/>
+    </Style>
+
+    <Style Selector="Button.accentBtn">
+      <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource OnAccentBrush}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="18,8"/>
+      <Setter Property="CornerRadius" Value="999"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style Selector="Button.accentBtn:pointerover /template/ ContentPresenter">
+      <Setter Property="Opacity" Value="0.92"/>
+    </Style>
+
+    <Style Selector="TextBox">
+      <Setter Property="Background" Value="{DynamicResource BgCardBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+      <Setter Property="CornerRadius" Value="999"/>
+      <Setter Property="CaretBrush" Value="{DynamicResource AccentBrush}"/>
+    </Style>
+    <Style Selector="Slider">
+      <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+    </Style>
+    <!-- Default slider behavior for EQ and settings: keep the theme-accent thumb visible, just smaller. -->
+    <Style Selector="Slider /template/ Thumb">
+      <Setter Property="Width" Value="8"/>
+      <Setter Property="Height" Value="8"/>
+      <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+    </Style>
+    <!-- Playback/progress sliders hide the thumb until hover; the thumb matches the active track color. -->
+    <Style Selector="Slider.hoverThumb /template/ Thumb">
+      <Setter Property="Width" Value="10"/>
+      <Setter Property="Height" Value="10"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+      <Setter Property="Opacity" Value="0"/>
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.14"/>
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Slider.hoverThumb:pointerover /template/ Thumb">
+      <Setter Property="Opacity" Value="1"/>
+    </Style>
+    <Style Selector="Slider.hoverThumb:pressed /template/ Thumb">
+      <Setter Property="Opacity" Value="1"/>
+    </Style>
+    <!-- Keep scrollbars visible and usable, with a slimmer but still easy-to-grab thumb. -->
+    <Style Selector="ScrollBar:vertical">
+      <Setter Property="Width" Value="8"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Background" Value="Transparent"/>
+    </Style>
+    <Style Selector="ScrollBar:horizontal">
+      <Setter Property="Height" Value="8"/>
+      <Setter Property="MinHeight" Value="8"/>
+      <Setter Property="Background" Value="Transparent"/>
+    </Style>
+    <Style Selector="ScrollBar /template/ Thumb">
+      <Setter Property="Background" Value="{DynamicResource TextSecondaryBrush}"/>
+      <Setter Property="Opacity" Value="0.9"/>
+      <Setter Property="Margin" Value="1"/>
+    </Style>
+    <Style Selector="ScrollBar:pointerover /template/ Thumb">
+      <Setter Property="Opacity" Value="1"/>
+      <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+    </Style>
+  </Window.Styles>
+
+  <Grid x:Name="RootLayerGrid">
+
+    <!-- ========================================== SPOTIFY-CLASS PC DESKTOP SHELL ========================================== -->
+    <Grid x:Name="DesktopShellGrid" RowDefinitions="38,*,86">
+
+      <!-- 1. Slim app-themed title bar with explicit window controls -->
+      <Border Grid.Row="0" x:Name="TitleBarDragRegion" Background="Transparent" Padding="14,0,0,0">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <!-- Brand: Exact Gradient Circle + Waveform SVG Logo -->
+          <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+            <Button x:Name="ToggleLeftSidebarBtn" Classes="ghost" Padding="5,3" ToolTip.Tip="Collapse navigation sidebar">
+              <PathIcon Data="{x:Static ui:Icons.ChevronLeft}" Width="14" Height="14"/>
+            </Button>
+            <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center" IsHitTestVisible="False">
+              <Image x:Name="TitleWaveLogo" Width="22" Height="22" Stretch="UniformToFill" VerticalAlignment="Center"/>
+              <TextBlock Text="Echo Music" FontSize="13.5" FontWeight="Bold" VerticalAlignment="Center"/>
+            </StackPanel>
+          </StackPanel>
+
+          <!-- Drag Spacer -->
+          <Border Grid.Column="1" Background="Transparent"/>
+
+          <!-- Titlebar quick actions and themed window controls -->
+          <StackPanel Grid.Column="2" Grid.ColumnSpan="1" x:Name="TitleBarActionsPanel" Orientation="Horizontal" Spacing="3" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,8,0">
+            <Button x:Name="MiniModeBtn" Classes="ghost" Padding="7,4" ToolTip.Tip="Compact Mini-Player (Ctrl+M)">
+              <PathIcon Data="{x:Static ui:Icons.Mini}" Width="14" Height="14"/>
+            </Button>
+            <Button x:Name="ResourceSaverBtn" Classes="ghost" Padding="7,4" ToolTip.Tip="Resource Saver">
+              <PathIcon x:Name="ResourceSaverIcon" Data="{x:Static ui:Icons.Leaf}" Width="15" Height="15"/>
+            </Button>
+            <Border Width="1" Height="18" Background="{DynamicResource BorderSubtleBrush}" VerticalAlignment="Center" Margin="4,0"/>
+            <Button x:Name="MinimizeWindowBtn" Classes="titlebarButton" ToolTip.Tip="Minimize">
+              <PathIcon Data="{x:Static ui:Icons.Minimize}" Width="14" Height="14"/>
+            </Button>
+            <Button x:Name="MaximizeWindowBtn" Classes="titlebarButton" ToolTip.Tip="Maximize or restore">
+              <PathIcon Data="{x:Static ui:Icons.Maximize}" Width="14" Height="14"/>
+            </Button>
+            <Button x:Name="CloseWindowBtn" Classes="titlebarButton titlebarClose" ToolTip.Tip="Close Echo Music">
+              <PathIcon Data="{x:Static ui:Icons.Close}" Width="14" Height="14"/>
+            </Button>
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <!-- 2. THREE-COLUMN WORKSPACE: SIDEBAR | MAIN | RIGHT PANEL (8px Pure Black Gaps, Zero Overlap) -->
+      <Grid Grid.Row="1" x:Name="WorkspaceColumnsGrid" ColumnDefinitions="244,*,312" Margin="8,0,8,0">
+
+        <!-- A. LEFT SIDEBAR -->
+        <Border Grid.Column="0"
+                x:Name="LeftSidebarBorder"
+                Background="{DynamicResource BgSidebarBrush}"
+                CornerRadius="8"
+                Padding="10,12"
+                Margin="0,0,8,0">
+          <Grid RowDefinitions="Auto,*,Auto">
+            <!-- Primary Navigation (Home, Search, Music Flow, Your Library) -->
+            <StackPanel Grid.Row="0" Spacing="2">
+              <Button x:Name="NavHomeBtn" Classes="navItem navActive">
+                <StackPanel Orientation="Horizontal" Spacing="14">
+                  <PathIcon Data="{x:Static ui:Icons.Home}" Width="17" Height="17"/>
+                  <TextBlock Text="Home" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="NavExploreBtn" Classes="navItem">
+                <StackPanel Orientation="Horizontal" Spacing="14">
+                  <PathIcon Data="{x:Static ui:Icons.Search}" Width="17" Height="17"/>
+                  <TextBlock Text="Search" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="NavFlowBtn" Classes="navItem">
+                <StackPanel Orientation="Horizontal" Spacing="14">
+                  <PathIcon Data="{x:Static ui:Icons.Flow}" Width="17" Height="17" Foreground="{DynamicResource AccentBrush}"/>
+                  <TextBlock Text="Music Flow" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="NavLibraryBtn" Classes="navItem">
+                <StackPanel Orientation="Horizontal" Spacing="14">
+                  <PathIcon Data="{x:Static ui:Icons.Library}" Width="17" Height="17"/>
+                  <TextBlock Text="Your Library" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
+
+            <!-- Scrollable Playlists + Shortcuts -->
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,12,0,0">
+              <StackPanel Spacing="14">
+                <!-- Playlists Section -->
+                <StackPanel Spacing="3">
+                  <Grid x:Name="PlaylistSectionHeaderGrid" ColumnDefinitions="*,Auto" Margin="12,0,4,4">
+                    <TextBlock Grid.Column="0" Text="PLAYLISTS" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" LetterSpacing="0.7" VerticalAlignment="Center"/>
+                    <Button Grid.Column="1" x:Name="CreatePlaylistSideBtn" Classes="ghost" Padding="5,3" ToolTip.Tip="New Playlist">
+                      <PathIcon Data="{x:Static ui:Icons.Plus}" Width="13" Height="13"/>
+                    </Button>
+                  </Grid>
+                  <Button x:Name="NavLikedBtn" Classes="navItem" Padding="8,4" HorizontalContentAlignment="Stretch">
+                    <Grid ColumnDefinitions="40,*,Auto">
+                      <Border Grid.Column="0" Width="40" Height="40" CornerRadius="5" HorizontalAlignment="Left" Margin="-2,0,0,0">
+                        <Border.Background>
+                          <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                            <GradientStop Offset="0" Color="#450AF5"/>
+                            <GradientStop Offset="1" Color="#1ED760"/>
+                          </LinearGradientBrush>
+                        </Border.Background>
+                        <PathIcon Data="{x:Static ui:Icons.HeartFilled}" Width="17" Height="17" Foreground="White"/>
+                      </Border>
+                      <TextBlock Grid.Column="1" Text="Liked Songs" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                      <TextBlock Grid.Column="2" x:Name="LikedCountBadge" Text="0" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center"/>
+                    </Grid>
+                  </Button>
+                  <StackPanel x:Name="SidebarPlaylistsPanel" Spacing="2"/>
+                </StackPanel>
+
+                <!-- Shortcuts Section -->
+                <StackPanel Spacing="2">
+                  <TextBlock Text="SHORTCUTS" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource TextMutedBrush}" LetterSpacing="0.7" Margin="12,0,0,4"/>
+                  <Button x:Name="NavDownloadsBtn" Classes="navItem" HorizontalContentAlignment="Stretch">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                      <PathIcon Grid.Column="0" Data="{x:Static ui:Icons.Download}" Width="15" Height="15" Margin="0,0,12,0"/>
+                      <TextBlock Grid.Column="1" Text="Downloads" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                      <TextBlock Grid.Column="2" x:Name="DownloadsCountBadge" Text="0" FontSize="11.5" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center"/>
+                    </Grid>
+                  </Button>
+                  <Button x:Name="NavSpotifyBtn" Classes="navItem">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                      <PathIcon Data="{x:Static ui:Icons.Spotify}" Width="15" Height="15" Foreground="#1ED760"/>
+                      <TextBlock Text="Spotify Import" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="NavEqBtn" Classes="navItem">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                      <PathIcon Data="{x:Static ui:Icons.Equalizer}" Width="15" Height="15"/>
+                      <TextBlock Text="Equalizer &amp; DSP" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="NavLocalBtn" Classes="navItem">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                      <PathIcon Data="{x:Static ui:Icons.Folder}" Width="15" Height="15"/>
+                      <TextBlock Text="Local Files" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="NavStatsBtn" Classes="navItem">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                      <PathIcon Data="{x:Static ui:Icons.Stats}" Width="15" Height="15"/>
+                      <TextBlock Text="Echo Wrapped" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                    </StackPanel>
+                  </Button>
+                </StackPanel>
+              </StackPanel>
+            </ScrollViewer>
+
+            <!-- Sidebar Footer -->
+            <StackPanel Grid.Row="2" Spacing="2" Margin="0,6,0,0">
+              <Button x:Name="NavAboutBtn" Classes="navItem">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                  <PathIcon Data="{x:Static ui:Icons.Info}" Width="15" Height="15"/>
+                  <TextBlock Text="About Echo Music" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+              <Button x:Name="NavSettingsBtn" Classes="navItem">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                  <PathIcon Data="{x:Static ui:Icons.Settings}" Width="15" Height="15"/>
+                  <TextBlock Text="Settings" FontSize="13.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                </StackPanel>
+              </Button>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <!-- B. MAIN PANEL: DEDICATED TOPBAR + SCROLLABLE VIEWPORT -->
+        <Border Grid.Column="1"
+                Background="{DynamicResource BgSurfaceBrush}"
+                CornerRadius="8"
+                ClipToBounds="True">
+          <Grid RowDefinitions="56,*">
+            <!-- Subtle Spotify Top Ambient Wash -->
+            <Border Grid.RowSpan="2" x:Name="AmbientBackdropGlow" Height="220" VerticalAlignment="Top" IsHitTestVisible="False" Opacity="0.32">
+              <Border.Background>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                  <GradientStop Offset="0.0" Color="#551ED760"/>
+                  <GradientStop Offset="1.0" Color="#00000000"/>
+                </LinearGradientBrush>
+              </Border.Background>
+            </Border>
+
+            <!-- Topbar inside Main (Back/Forward | Searchbar | Command Palette, Account, Queue) -->
+            <Border Grid.Row="0" Padding="16,0" Background="Transparent">
+              <Grid ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+                <!-- Back / Forward -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" Margin="0,0,14,0">
+                  <Button x:Name="BackNavBtn" Classes="topNavCircle" ToolTip.Tip="Back (Alt+Left)">
+                    <PathIcon Data="{x:Static ui:Icons.ChevronLeft}" Width="15" Height="15"/>
+                  </Button>
+                  <Button x:Name="ForwardNavBtn" Classes="topNavCircle" ToolTip.Tip="Forward (Alt+Right)">
+                    <PathIcon Data="{x:Static ui:Icons.ChevronRight}" Width="15" Height="15"/>
+                  </Button>
+                </StackPanel>
+
+                <!-- Searchbar (fluid width - never collides with right action pills!) -->
+                <Grid Grid.Column="1" MaxWidth="330" HorizontalAlignment="Stretch" VerticalAlignment="Center" Margin="0,0,12,0">
+                  <TextBox x:Name="GlobalSearchBox"
+                           Watermark="Search songs, albums, artists…"
+                           CornerRadius="999"
+                           Padding="36,8,32,8"
+                           FontSize="13.5"/>
+                  <PathIcon Data="{x:Static ui:Icons.Search}" Width="15" Height="15"
+                            HorizontalAlignment="Left" VerticalAlignment="Center" Margin="13,0,0,0"
+                            Foreground="{DynamicResource TextMutedBrush}" IsHitTestVisible="False"/>
+                  <Button x:Name="ClearSearchBtn"
+                          Classes="ghost"
+                          IsVisible="False"
+                          Padding="5"
+                          HorizontalAlignment="Right" VerticalAlignment="Center"
+                          Margin="0,0,6,0"
+                          ToolTip.Tip="Clear Search">
+                    <PathIcon Data="{x:Static ui:Icons.Close}" Width="12" Height="12"/>
+                  </Button>
+                </Grid>
+
+                <!-- Topbar Right Actions -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="10,0,0,0">
+                  <Button x:Name="SleepTimerTopBtn" Classes="ghost" ToolTip.Tip="Sleep Timer">
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                      <PathIcon Data="{x:Static ui:Icons.Sleep}" Width="14" Height="14"/>
+                      <TextBlock x:Name="SleepTimerTopLabel" Text="" FontSize="11.5" VerticalAlignment="Center" IsVisible="False"/>
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="CommandPaletteOpenBtn" Classes="pill" Padding="10,5" IsVisible="False" ToolTip.Tip="Command Palette (Ctrl+K)">
+                    <TextBlock Text="Ctrl+K" FontSize="11.5" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                  </Button>
+                  <Button x:Name="AccountTopBtn" Classes="pill" Padding="12,5" IsVisible="False" ToolTip.Tip="Account / Guest Mode">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                      <PathIcon Data="{x:Static ui:Icons.User}" Width="14" Height="14" Foreground="{DynamicResource AccentBrush}"/>
+                      <TextBlock x:Name="AccountTopLabel" Text="Guest" FontSize="12.5" FontWeight="SemiBold"/>
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="ToggleQueueTopBtn" Classes="ghost" Padding="8,6" ToolTip.Tip="Toggle Right Panel (Ctrl+Q)">
+                    <PathIcon Data="{x:Static ui:Icons.Queue}" Width="16" Height="16"/>
+                  </Button>
+                </StackPanel>
+              </Grid>
+            </Border>
+
+            <!-- Scrollable Main Viewport -->
+            <Grid Grid.Row="1">
+              <ScrollViewer x:Name="CenterScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <Panel x:Name="CenterViewHost" Margin="20,8,20,28"/>
+              </ScrollViewer>
+
+              <!-- Search Suggestions Dropdown anchored cleanly below Searchbar -->
+              <Border x:Name="SearchSuggestPopup"
+                      IsVisible="False"
+                      VerticalAlignment="Top"
+                      HorizontalAlignment="Left"
+                      Width="380"
+                      Margin="94,2,0,0"
+                      Background="{DynamicResource BgCardBrush}"
+                      BorderBrush="{DynamicResource BorderSubtleBrush}"
+                      BorderThickness="1"
+                      CornerRadius="12"
+                      Padding="6"
+                      BoxShadow="0 12 32 0 #90000000">
+                <StackPanel Spacing="3">
+                  <StackPanel x:Name="SearchSuggestList" Spacing="2"/>
+                  <TextBlock Text="↑ / ↓ to select  ·  Enter to search  ·  Esc to close"
+                             FontSize="10.5" Foreground="{DynamicResource TextMutedBrush}"
+                             Margin="8,4,6,2"/>
+                </StackPanel>
+              </Border>
+            </Grid>
+          </Grid>
+        </Border>
+
+        <!-- C. RIGHT PANEL (rpanel: Now playing | Queue | Lyrics | Related + Close) -->
+        <Border Grid.Column="2"
+                x:Name="RightDockBorder"
+                Background="{DynamicResource BgSidebarBrush}"
+                CornerRadius="8"
+                Padding="12,10"
+                Margin="8,0,0,0"
+                ClipToBounds="True">
+          <Grid RowDefinitions="Auto,*">
+            <Grid Grid.Row="0" ColumnDefinitions="*,*,*,Auto" Margin="0,0,0,10">
+              <Button Grid.Column="0" x:Name="DockTabNowBtn" Classes="rpanelTab rpanelTabActive" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Content="Now"/>
+              <Button Grid.Column="1" x:Name="DockTabQueueBtn" Classes="rpanelTab" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Content="Queue"/>
+              <Button Grid.Column="2" x:Name="DockTabDnaBtn" Classes="rpanelTab" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Content="Related"/>
+              <Button Grid.Column="3" x:Name="CloseRightDockBtn" Classes="ghost" Padding="6,4" Margin="2,0,0,0" ToolTip.Tip="Close Panel">
+                <PathIcon Data="{x:Static ui:Icons.Close}" Width="12" Height="12"/>
+              </Button>
+            </Grid>
+
+            <Panel Grid.Row="1" x:Name="RightDockContentHost" ClipToBounds="True"/>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- 3. CLEAN SPOTIFY BOTTOM PLAYERBAR (Left Meta | Center Controls + Seek | Right Actions + Volume) -->
+      <Border Grid.Row="2"
+              Background="{DynamicResource BgPlayerBarBrush}"
+              Padding="16,8">
+        <Grid ColumnDefinitions="300,*,300">
+
+          <!-- Left: 56x56 Art + Ellipsized Title/Artist + Like -->
+          <Grid Grid.Column="0" ColumnDefinitions="56,*,Auto,Auto" VerticalAlignment="Center">
+            <Button Grid.Column="0" x:Name="NowArtExpandBtn" Classes="ghost" Padding="0" Width="56" Height="56" CornerRadius="6" ToolTip.Tip="Open Fullscreen Player (F)">
+              <Border Width="56" Height="56" CornerRadius="6" ClipToBounds="True" Background="{DynamicResource BgCardBrush}">
+                <Image x:Name="NowPlayingArtImg" Stretch="UniformToFill" RenderOptions.BitmapInterpolationMode="HighQuality"/>
+              </Border>
+            </Button>
+
+            <StackPanel Grid.Column="1" Margin="12,0,8,0" VerticalAlignment="Center" Spacing="2" ClipToBounds="True">
+              <TextBlock x:Name="NowPlayingTitleText"
+                         Text="Nothing playing"
+                         FontSize="13.5" FontWeight="SemiBold"
+                         TextTrimming="CharacterEllipsis"/>
+              <Button x:Name="NowPlayingArtistBtn" Classes="ghost" Padding="0" HorizontalAlignment="Left">
+                <TextBlock x:Name="NowPlayingArtistText"
+                           Text="Pick something to start"
+                           FontSize="11.5"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis"/>
+              </Button>
+              <Border x:Name="StreamQualityPill" IsVisible="False" Background="{DynamicResource AccentSoftBrush}" CornerRadius="4" Padding="5,1" HorizontalAlignment="Left">
+                <TextBlock x:Name="StreamQualityText" Text="OPUS 160K" FontSize="9" FontWeight="Bold" Foreground="{DynamicResource AccentBrush}"/>
+              </Border>
+            </StackPanel>
+
+            <Button Grid.Column="2" x:Name="NowLikeBtn" Classes="ghost" Padding="7" VerticalAlignment="Center" ToolTip.Tip="Save to Liked Songs (L)">
+              <PathIcon x:Name="NowLikeIcon" Data="{x:Static ui:Icons.HeartOutline}" Width="16" Height="16"/>
+            </Button>
+            <Button Grid.Column="3" x:Name="NowMoreBtn" Classes="ghost" Padding="6" VerticalAlignment="Center" ToolTip.Tip="Song actions and content exclusions">
+              <PathIcon Data="{x:Static ui:Icons.More}" Width="16" Height="16"/>
+            </Button>
+          </Grid>
+
+          <!-- Center: Transport Controls + Seek Track -->
+          <StackPanel Grid.Column="1" VerticalAlignment="Center" MaxWidth="560" Margin="16,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="12" VerticalAlignment="Center">
+              <Button x:Name="ShuffleBtn" Classes="ghost" Padding="6" ToolTip.Tip="Shuffle (S)">
+                <PathIcon x:Name="ShuffleIcon" Data="{x:Static ui:Icons.Shuffle}" Width="15" Height="15"/>
+              </Button>
+              <Button x:Name="SkipBack10Btn" Classes="ghost" Padding="5,3" IsVisible="False" ToolTip.Tip="Rewind 10s">
+                <TextBlock Text="-10s" FontSize="10.5" FontWeight="Bold"/>
+              </Button>
+              <Button x:Name="PrevBtn" Classes="ghost" Padding="6" ToolTip.Tip="Previous (Ctrl+Left)">
+                <PathIcon Data="{x:Static ui:Icons.Prev}" Width="17" Height="17"/>
+              </Button>
+              <Button x:Name="PlayPauseBtn" Classes="ghost" Padding="0" Width="36" Height="36" ToolTip.Tip="Play / Pause (Space)">
+                <ui:ScallopBadgeControl x:Name="PlayPauseScallop" Width="34" Height="34"/>
+              </Button>
+              <Button x:Name="NextBtn" Classes="ghost" Padding="6" ToolTip.Tip="Next (Ctrl+Right)">
+                <PathIcon Data="{x:Static ui:Icons.Next}" Width="17" Height="17"/>
+              </Button>
+              <Button x:Name="SkipFwd10Btn" Classes="ghost" Padding="5,3" IsVisible="False" ToolTip.Tip="Forward 10s">
+                <TextBlock Text="+10s" FontSize="10.5" FontWeight="Bold"/>
+              </Button>
+              <Button x:Name="RepeatBtn" Classes="ghost" Padding="6" ToolTip.Tip="Repeat (R)">
+                <PathIcon x:Name="RepeatIcon" Data="{x:Static ui:Icons.Repeat}" Width="15" Height="15"/>
+              </Button>
+            </StackPanel>
+
+            <Grid ColumnDefinitions="38,*,38" VerticalAlignment="Center" Margin="0,-3,0,0">
+              <TextBlock Grid.Column="0" x:Name="PosTimeText" Text="0:00" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center"/>
+              <Grid Grid.Column="1" Margin="6,0" VerticalAlignment="Center">
+                <Slider x:Name="SeekSlider" Classes="hoverThumb" Minimum="0" Maximum="100" Value="0" Margin="0"/>
+                <ProgressBar x:Name="SeekLoadingBar" IsIndeterminate="True" IsVisible="False" Height="3" VerticalAlignment="Center" Margin="8,0"/>
+              </Grid>
+              <TextBlock Grid.Column="2" x:Name="DurTimeText" Text="0:00" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+            </Grid>
+          </StackPanel>
+
+          <!-- Right: Spectrum + Lyrics + Radio + Download + Share + Volume + Fullscreen -->
+          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="3">
+            <ui:SpectrumVisualizerControl x:Name="MiniBarSpectrum" Width="38" Height="18" BarCount="10" Margin="0,0,4,0"/>
+            <Button x:Name="ToggleLyricsBarBtn" Classes="ghost" Padding="6" ToolTip.Tip="Lyrics">
+              <PathIcon Data="{x:Static ui:Icons.Lyrics}" Width="15" Height="15"/>
+            </Button>
+            <Button x:Name="StartRadioBarBtn" Classes="ghost" Padding="6" ToolTip.Tip="Start Song Radio - queue similar tracks based on the current song">
+              <PathIcon Data="{x:Static ui:Icons.Radio}" Width="15" Height="15"/>
+            </Button>
+            <Button x:Name="NowDownloadBtn" Classes="ghost" Padding="6" ToolTip.Tip="Download Offline">
+              <PathIcon x:Name="NowDownloadIcon" Data="{x:Static ui:Icons.Download}" Width="15" Height="15"/>
+            </Button>
+            <Button x:Name="ShareBarBtn" Classes="ghost" Padding="6" ToolTip.Tip="Share Song Link">
+              <PathIcon Data="{x:Static ui:Icons.Share}" Width="14" Height="14"/>
+            </Button>
+            <Button x:Name="MuteBtn" Classes="ghost" Padding="6" ToolTip.Tip="Mute (M)">
+              <PathIcon x:Name="VolumeIcon" Data="{x:Static ui:Icons.VolumeHigh}" Width="15" Height="15"/>
+            </Button>
+            <Slider x:Name="VolumeSlider" Classes="hoverThumb" Width="80" Minimum="0" Maximum="1" Value="0.85" VerticalAlignment="Center"/>
+            <Button x:Name="FullscreenPlayerBtn" Classes="ghost" Padding="6" ToolTip.Tip="Fullscreen Player (F11)">
+              <PathIcon Data="{x:Static ui:Icons.Expand}" Width="15" Height="15"/>
+            </Button>
+          </StackPanel>
+        </Grid>
+      </Border>
+    </Grid>
+
+    <!-- ========================================== FULLSCREEN BLURRED-ARTWORK & LYRICS PLAYER ========================================== -->
+    <Border x:Name="FullscreenOverlay"
+            IsVisible="False"
+            Background="#0D0F12"
+            ClipToBounds="True">
+      <Grid>
+        <Image x:Name="FsBackdropImg" Stretch="UniformToFill" Opacity="0.48" IsHitTestVisible="False">
+          <Image.Effect>
+            <BlurEffect Radius="72"/>
+          </Image.Effect>
+        </Image>
+        <Border Background="#88080A0D" IsHitTestVisible="False"/>
+
+        <Grid RowDefinitions="Auto,*" Margin="38,40,38,28">
+          <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto">
+            <Button Grid.Column="0" x:Name="CloseFullscreenBtn" Classes="pill" Background="#28FFFFFF" BorderThickness="0" Foreground="White">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <PathIcon Data="{x:Static ui:Icons.ChevronLeft}" Width="13" Height="13" Foreground="White"/>
+                <TextBlock Text="Back (Esc)" FontSize="12.5" Foreground="White"/>
+              </StackPanel>
+            </Button>
+
+            <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center">
+              <TextBlock Text="NOW PLAYING" FontSize="11" FontWeight="Bold" LetterSpacing="1.2" Foreground="#B8FFFFFF" HorizontalAlignment="Center"/>
+              <TextBlock x:Name="FsHeaderSubText" Text="Echo Music" FontSize="12.5" FontWeight="SemiBold" Foreground="White" HorizontalAlignment="Center"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <Button x:Name="FsLyricsRefreshBtn" Classes="ghost" Width="32" Height="32" Padding="0" CornerRadius="8" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" ToolTip.Tip="Refresh lyrics">
+                <PathIcon Data="{x:Static ui:Icons.Refresh}" Width="15" Height="15" Foreground="White"/>
+              </Button>
+              <Button x:Name="FsLyricsEnglishBtn" Classes="ghost" Width="32" Height="32" Padding="0" CornerRadius="8" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" ToolTip.Tip="Translate lyrics to English">
+                <PathIcon Data="{x:Static ui:Icons.Translate}" Width="15" Height="15" Foreground="White"/>
+              </Button>
+              <Button x:Name="FsLyricsLatinBtn" Classes="ghost" Width="32" Height="32" Padding="0" CornerRadius="8" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" ToolTip.Tip="Toggle original script / Latin transliteration">
+                <TextBlock Text="Aa" FontSize="11" FontWeight="Bold" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Button>
+              <ui:SpectrumVisualizerControl x:Name="FsSpectrum" Width="96" Height="24" BarCount="16" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+
+          <Grid Grid.Row="1" ColumnDefinitions="410,*" Margin="0,18,0,0">
+            <StackPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Center" Width="340" Spacing="16">
+              <Border Width="300" Height="300" CornerRadius="16" ClipToBounds="True" Background="#24FFFFFF" BoxShadow="0 22 56 0 #80000000" HorizontalAlignment="Center">
+                <Grid ClipToBounds="True">
+                  <Image x:Name="FsArtImg" Stretch="UniformToFill" RenderOptions.BitmapInterpolationMode="HighQuality"/>
+                  <Border x:Name="FsArtSpectrumPlate" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="12" Padding="5,3" CornerRadius="5" Background="#88000000" IsVisible="False" IsHitTestVisible="False">
+                    <ui:SpectrumVisualizerControl x:Name="FsArtSpectrum" Width="40" Height="22" BarCount="7"/>
+                  </Border>
+                </Grid>
+              </Border>
+
+              <Grid ColumnDefinitions="*,Auto" Margin="2,4,2,0">
+                <StackPanel Grid.Column="0" Spacing="3" VerticalAlignment="Center" Margin="0,0,10,0">
+                  <TextBlock x:Name="FsTitleText" Text="Nothing playing" FontSize="21" FontWeight="Bold" Foreground="White" TextTrimming="CharacterEllipsis"/>
+                  <TextBlock x:Name="FsArtistText" Text="" FontSize="14" Foreground="#CCFFFFFF" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                  <Button x:Name="FsDownloadBtn" Classes="ghost" Width="38" Height="38" Background="#26FFFFFF">
+                    <PathIcon Data="{x:Static ui:Icons.Download}" Width="16" Height="16" Foreground="White"/>
+                  </Button>
+                  <Button x:Name="FsLikeBtn" Classes="ghost" Width="38" Height="38" Background="#26FFFFFF">
+                    <PathIcon x:Name="FsLikeIcon" Data="{x:Static ui:Icons.HeartOutline}" Width="16" Height="16" Foreground="White"/>
+                  </Button>
+                </StackPanel>
+              </Grid>
+
+              <StackPanel Spacing="2">
+                <Grid VerticalAlignment="Center">
+                  <Slider x:Name="FsSeekSlider" Classes="hoverThumb" Minimum="0" Maximum="100" Value="0"/>
+                  <ProgressBar x:Name="FsSeekLoadingBar" IsIndeterminate="True" IsVisible="False" Height="3" VerticalAlignment="Center" Margin="8,0"/>
+                </Grid>
+                <Grid ColumnDefinitions="*,*">
+                  <TextBlock Grid.Column="0" x:Name="FsPosText" Text="0:00" FontSize="11.5" Foreground="#CCFFFFFF"/>
+                  <TextBlock Grid.Column="1" x:Name="FsDurText" Text="0:00" FontSize="11.5" Foreground="#CCFFFFFF" HorizontalAlignment="Right"/>
+                </Grid>
+              </StackPanel>
+
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="20" VerticalAlignment="Center">
+                <Button x:Name="FsPrevBtn" Width="48" Height="48" CornerRadius="24" Background="#26FFFFFF" Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Cursor="Hand">
+                  <PathIcon Data="{x:Static ui:Icons.Prev}" Width="19" Height="19" Foreground="White"/>
+                </Button>
+                <Button x:Name="FsPlayPauseBtn" Classes="ghost" Padding="0" Width="64" Height="64">
+                  <ui:ScallopBadgeControl x:Name="FsScallop" Width="62" Height="62"/>
+                </Button>
+                <Button x:Name="FsNextBtn" Width="48" Height="48" CornerRadius="24" Background="#26FFFFFF" Padding="0" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" Cursor="Hand">
+                  <PathIcon Data="{x:Static ui:Icons.Next}" Width="19" Height="19" Foreground="White"/>
+                </Button>
+              </StackPanel>
+            </StackPanel>
+
+            <Border Grid.Column="1" Margin="34,0,0,0" Background="#16FFFFFF" CornerRadius="20" Padding="32,22">
+              <ScrollViewer x:Name="FsLyricsScroller" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="FsLyricsStack" Spacing="16" Margin="0,24,0,80" HorizontalAlignment="Stretch"/>
+              </ScrollViewer>
+            </Border>
+          </Grid>
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- ========================================== COMPACT MINI-PLAYER SHELL ========================================== -->
+    <Border x:Name="MiniPlayerOverlay"
+            IsVisible="False"
+            Background="{DynamicResource BgSidebarBrush}"
+            BorderBrush="{DynamicResource BorderSubtleBrush}"
+            BorderThickness="1"
+            CornerRadius="12"
+            Padding="14,34,14,10">
+      <Grid RowDefinitions="*,Auto">
+        <Grid Grid.Row="0" x:Name="MiniDragHeader" ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+          <Border Grid.Column="0" Width="48" Height="48" CornerRadius="6" ClipToBounds="True" Background="{DynamicResource BgCardBrush}">
+            <Image x:Name="MiniArtImg" Stretch="UniformToFill"/>
+          </Border>
+          <StackPanel Grid.Column="1" Margin="12,0" VerticalAlignment="Center" Spacing="2" MinWidth="0">
+            <TextBlock x:Name="MiniTitleText" Text="Echo Music" FontSize="13.5" FontWeight="Bold" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+            <TextBlock x:Name="MiniArtistText" Text="Compact Mode" FontSize="11.5" Foreground="{DynamicResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+          </StackPanel>
+          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="3" VerticalAlignment="Center">
+            <Button x:Name="MiniPrevBtn" Classes="ghost" Width="32" Height="32" Padding="0"><PathIcon Data="{x:Static ui:Icons.Prev}" Width="15" Height="15"/></Button>
+            <Button x:Name="MiniPlayBtn" Classes="ghost" Padding="0" Width="36" Height="36">
+              <ui:ScallopBadgeControl x:Name="MiniScallop" Width="34" Height="34"/>
+            </Button>
+            <Button x:Name="MiniNextBtn" Classes="ghost" Width="32" Height="32" Padding="0"><PathIcon Data="{x:Static ui:Icons.Next}" Width="15" Height="15"/></Button>
+            <Button x:Name="ExitMiniBtn" Classes="ghost" Width="32" Height="32" Padding="0" ToolTip.Tip="Restore Full Window (Ctrl+M)">
+              <PathIcon Data="{x:Static ui:Icons.Expand}" Width="14" Height="14"/>
+            </Button>
+          </StackPanel>
+        </Grid>
+        <Grid Grid.Row="1" Margin="0,4,0,0" VerticalAlignment="Center">
+          <Slider x:Name="MiniSeekSlider" Classes="hoverThumb" Minimum="0" Maximum="100" Value="0" Margin="0"/>
+          <ProgressBar x:Name="MiniSeekLoadingBar" IsIndeterminate="True" IsVisible="False" Height="3" VerticalAlignment="Center" Margin="8,0"/>
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- ========================================== COMMAND PALETTE / MODAL DIALOG HOST ========================================== -->
+    <Border x:Name="ModalBackdrop"
+            IsVisible="False"
+            Background="#AC000000">
+      <Border x:Name="ModalCardHost"
+              Width="540"
+              MaxWidth="640"
+              MaxHeight="560"
+              VerticalAlignment="Center"
+              HorizontalAlignment="Center"
+              Background="{DynamicResource BgSidebarBrush}"
+              BorderBrush="{DynamicResource BorderSubtleBrush}"
+              BorderThickness="1"
+              CornerRadius="12"
+              Padding="24"
+              BoxShadow="0 24 64 0 #B0000000"/>
+    </Border>
+
+    <!-- ========================================== FLOATING TOAST NOTIFICATION ========================================== -->
+    <Border x:Name="ToastBanner"
+            IsVisible="False"
+            IsHitTestVisible="False"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Bottom"
+            Margin="0,0,0,100"
+            MaxWidth="600"
+            Background="{DynamicResource BgCardBrush}"
+            BorderBrush="{DynamicResource AccentBrush}"
+            BorderThickness="1"
+            CornerRadius="999"
+            Padding="18,8"
+            BoxShadow="0 8 24 0 #90000000">
+      <TextBlock x:Name="ToastText" Text="" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap"/>
+    </Border>
+  </Grid>
+</Window>

@@ -1,0 +1,14 @@
+<Project>
+  <!-- Keep Linux build products outside the shared workspace, but use conventional project-local
+       paths on Windows so a source checkout builds without relying on a sandbox-only /opt path. -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(MSBuildThisFileDirectory)obj\</MSBuildProjectExtensionsPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)bin\</BaseOutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(OS)' != 'Windows_NT'">
+    <BaseIntermediateOutputPath>/var/tmp/echomusic-build/obj/</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>/var/tmp/echomusic-build/obj/</MSBuildProjectExtensionsPath>
+    <BaseOutputPath>/var/tmp/echomusic-build/bin/</BaseOutputPath>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework Condition="'$(BuildWindows)' != 'true'">net8.0</TargetFramework>
+    <TargetFramework Condition="'$(BuildWindows)' == 'true'">net8.0-windows10.0.19041.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <DefineConstants Condition="'$(BuildWindows)' == 'true'">$(DefineConstants);WINDOWS_NATIVE</DefineConstants>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <ApplicationIcon>Assets\echo.ico</ApplicationIcon>
+    <AssemblyName>EchoMusic</AssemblyName>
+    <Version>2.0.0</Version>
+    <Product>Echo Music</Product>
+    <Company>V!SHNU</Company>
+    <Copyright>Copyright (C) 2026 Echo Music (GPL-3.0)</Copyright>
+    <Description>Native PC Edition of Echo Music - Ad-free streaming, SMTC, Discord RPC, SponsorBlock, synced lyrics, Music DNA, Music Flow, 10-band EQ, WSOLA pitch-lock, and offline playback.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="installer/ui/**/*.cs" />
+    <AvaloniaResource Include="Assets\**" />
+    <None Include="Assets\echo.ico" Link="echo-emerald-v20.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets\echo-*.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets\MobileIcons\*.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.3" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.2.3" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="TagLibSharp" Version="2.3.0" />
+    <PackageReference Include="AnyAscii" Version="0.3.3" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" Condition="'$(BuildWindows)' == 'true'" ExcludeAssets="build;buildTransitive" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <!-- Only bundle lightweight Core WebView2 wrapper + native WebView2Loader.dll (no WPF/WinForms conflict) -->
+  <ItemGroup Condition="'$(BuildWindows)' == 'true'">
+    <Reference Include="Microsoft.Web.WebView2.Core">
+      <HintPath>$(PkgMicrosoft_Web_WebView2)/lib_manual/netcoreapp3.0/Microsoft.Web.WebView2.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <None Include="$(PkgMicrosoft_Web_WebView2)/runtimes/win-x64/native/WebView2Loader.dll"
+          Link="WebView2Loader.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

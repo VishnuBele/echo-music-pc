@@ -1,0 +1,17 @@
+# .NET / Avalonia build output
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.cache
+.avalonia-build-tasks/
+
+# Local publish and package artifacts
+publish-win-x64/
+EchoMusic-Setup-*.exe
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
