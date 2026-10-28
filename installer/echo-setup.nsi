@@ -14,7 +14,7 @@ SetCompressorDictSize 16
 
 !define APP_NAME "Echo Music"
 !define APP_EXE "EchoMusic.exe"
-!define APP_VERSION "2.0.0"
+!define APP_VERSION "2.0.1"
 !define APP_PUBLISHER "V!SHNU"
 !define APP_URL "https://github.com/VishnuBele/echo-music-pc"
 !define SOURCE_DIR "${__FILEDIR__}/.."
@@ -24,7 +24,7 @@ SetCompressorDictSize 16
   !define PUBLISH_DIR "${SOURCE_DIR}/publish-win-x64"
 !endif
 !ifndef OUT_FILE
-  !define OUT_FILE "${SOURCE_DIR}/../EchoMusic-Setup-v2.0.0-x64.exe"
+  !define OUT_FILE "${SOURCE_DIR}/../EchoMusic-Setup-v2.0.1-x64.exe"
 !endif
 !ifndef PAYLOAD_INCLUDE
   !error "PAYLOAD_INCLUDE must point to the generated per-file progress include"
@@ -72,7 +72,7 @@ BrandingText "${APP_NAME} v${APP_VERSION} - Native PC Edition"
 !insertmacro MUI_LANGUAGE "English"
 
 ; PE Version Info
-VIProductVersion "2.0.0.0"
+VIProductVersion "2.0.1.0"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "FileDescription" "${APP_NAME} Windows x64 Setup"

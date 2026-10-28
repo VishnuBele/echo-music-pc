@@ -1554,7 +1554,7 @@ public partial class MainWindow
     internal void RenderSettingsView()
     {
         var s = _store.Settings;
-        var root = new StackPanel { Spacing = 22, MaxWidth = _leftSidebarMode == "Expanded" ? 840 : double.PositiveInfinity, HorizontalAlignment = _leftSidebarMode == "Expanded" ? HorizontalAlignment.Left : HorizontalAlignment.Stretch };
+        var root = new StackPanel { Spacing = 22, MaxWidth = 1120, HorizontalAlignment = HorizontalAlignment.Center };
         root.Children.Add(new TextBlock { Text = "Settings", FontSize = 26, FontWeight = FontWeight.ExtraBold });
         var settingsSearch = new TextBox { Text = _settingsSearchQuery, Watermark = "Search settings…", Padding = new Thickness(13, 9), MinHeight = 38 };
         var noSettingsMatch = new TextBlock { Text = "No settings sections match that search.", FontSize = 13, Foreground = ResBrush("TextSecondaryBrush"), IsVisible = false, Margin = new Thickness(4, 0) };
@@ -1573,6 +1573,55 @@ public partial class MainWindow
         settingsSearch.TextChanged += (_, _) => { _settingsSearchQuery = settingsSearch.Text ?? ""; ApplySettingsSearch(); };
         root.Children.Add(settingsSearch);
 
+        var shortcutsCard = new StackPanel { Spacing = 10 };
+        shortcutsCard.Children.Add(new TextBlock { Text = "KEYBOARD SHORTCUTS", FontSize = 11, FontWeight = FontWeight.Bold, Foreground = ResBrush("AccentBrush") });
+        shortcutsCard.Children.Add(new TextBlock
+        {
+            Text = "Shortcuts work when a text field is not focused. Press Esc to close the topmost dialog or fullscreen player.",
+            FontSize = 12,
+            Foreground = ResBrush("TextSecondaryBrush"),
+            TextWrapping = TextWrapping.Wrap,
+        });
+        var shortcutRows = new StackPanel { Spacing = 5 };
+        foreach (var (keys, action) in new (string Keys, string Action)[]
+        {
+            ("Space", "Play or pause"),
+            ("← / →", "Seek backward or forward 5 seconds"),
+            ("Ctrl + ← / →", "Play the previous or next track"),
+            ("F or F11", "Open or close the fullscreen player"),
+            ("M", "Mute or unmute"),
+            ("S", "Toggle shuffle"),
+            ("R", "Cycle repeat mode"),
+            ("L", "Like or unlike the current song"),
+            ("Ctrl + F", "Focus the search box"),
+            ("Ctrl + K", "Open the Command Palette"),
+            ("Ctrl + Q", "Open or close the right-side queue / lyrics panel"),
+            ("Ctrl + ,", "Open Settings"),
+            ("Ctrl + M", "Toggle the mini-player"),
+            ("Alt + ← / →", "Go back or forward in navigation history"),
+            ("Esc", "Close a dialog or fullscreen player; clear search when applicable"),
+        })
+        {
+            var row = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("150,*") };
+            var keycap = new Border
+            {
+                Background = ResBrush("BgSurfaceBrush"),
+                BorderBrush = ResBrush("BorderSubtleBrush"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(7, 3),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock { Text = keys, FontSize = 11.5, FontWeight = FontWeight.SemiBold, FontFamily = new FontFamily("Consolas, monospace") },
+            };
+            row.Children.Add(keycap);
+            var description = new TextBlock { Text = action, FontSize = 12.5, Foreground = ResBrush("TextSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+            Grid.SetColumn(description, 1);
+            row.Children.Add(description);
+            shortcutRows.Children.Add(row);
+        }
+        shortcutsCard.Children.Add(shortcutRows);
+        root.Children.Add(WrapSettingsCard(shortcutsCard, "keyboard shortcuts hotkeys space arrows seek playback next previous fullscreen mute shuffle repeat like search command palette queue settings mini player navigation escape"));
+
         if (OperatingSystem.IsWindows())
         {
             var startupCard = new StackPanel { Spacing = 12 };
@@ -1580,7 +1629,7 @@ public partial class MainWindow
             var startupWarningGrid = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("Auto,*"), HorizontalAlignment = HorizontalAlignment.Stretch };
             var warningIcon = new PathIcon { Data = Icons.ShieldCheck, Width = 19, Height = 19, Margin = new Thickness(0, 1, 10, 0), Foreground = new SolidColorBrush(Color.Parse("#F3C64E")), VerticalAlignment = VerticalAlignment.Top };
             startupWarningGrid.Children.Add(warningIcon);
-            var startupWarningText = new TextBlock { Text = "This Echo Music app is distributed unsigned, so SmartScreen or antivirus may warn or quarantine the setup file. Verify the source and SHA-256 first. If quarantined, review the vendor detection; restore it or add an exclusion only if you have verified and trust this exact file. Echo Music never disables antivirus.", FontSize = 12.5, MaxWidth = 710, HorizontalAlignment = HorizontalAlignment.Stretch, Foreground = ResBrush("TextPrimaryBrush"), TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Top };
+            var startupWarningText = new TextBlock { Text = "This Echo Music app is distributed unsigned, so SmartScreen or antivirus may warn or quarantine the setup file. Verify the source and SHA-256 first. If quarantined, review the vendor detection; restore it or add an exclusion only if you have verified and trust this exact file. Echo Music never disables antivirus.", FontSize = 12.5, MaxWidth = 1000, HorizontalAlignment = HorizontalAlignment.Left, Foreground = ResBrush("TextPrimaryBrush"), TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Top };
             Grid.SetColumn(startupWarningText, 1);
             startupWarningGrid.Children.Add(startupWarningText);
             startupCard.Children.Add(new Border { HorizontalAlignment = HorizontalAlignment.Stretch, Background = new SolidColorBrush(Color.FromArgb(28, 243, 198, 78)), BorderBrush = new SolidColorBrush(Color.FromArgb(112, 243, 198, 78)), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Padding = new Thickness(10), Child = startupWarningGrid });

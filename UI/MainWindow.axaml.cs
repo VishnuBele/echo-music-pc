@@ -52,6 +52,11 @@ public partial class MainWindow : Window
     private string _leftSidebarMode = "Expanded";
     private readonly Dictionary<TextBlock, bool> _sidebarTextOriginalVisibility = new();
     private DispatcherTimer? _leftSidebarAnimation;
+    private bool _sidebarCompactAnimationPending;
+    private bool _sidebarContentOffsetAnimating;
+    private double _sidebarContentOffsetProgress;
+    private double _sidebarContentOffsetFrom;
+    private double _sidebarContentOffsetTo;
     private DispatcherTimer? _rightSidebarAnimation;
     private readonly Dictionary<ScrollViewer, DispatcherTimer> _smoothScrollTimers = new();
     private readonly Dictionary<ScrollViewer, Vector> _smoothScrollTargets = new();
@@ -511,12 +516,6 @@ public partial class MainWindow : Window
         Resources["SliderThumbBackgroundPointerOver"] = sliderThumbBrush;
         Resources["SliderThumbBackgroundPressed"] = sliderThumbBrush;
         Resources["SliderThumbBackgroundDisabled"] = sliderThumbBrush;
-        foreach (var seekSlider in new[] { SeekSlider, FsSeekSlider, MiniSeekSlider })
-        {
-            seekSlider.Resources["SliderTrackThemeHeight"] = 3d;
-            seekSlider.Resources["ControlCornerRadius"] = new CornerRadius(2);
-            seekSlider.Resources["SliderThumbCornerRadius"] = new CornerRadius(5);
-        }
         UpdateImageShimmerColors(pal.Accent);
 
         FontFamily = ThemeManager.ResolveFont(_store.Settings.FontChoice);
@@ -792,12 +791,6 @@ public partial class MainWindow : Window
             }
         };
 
-        ShareBarBtn.Click += async (_, _) =>
-        {
-            if (_audio.CurrentTrack is { } tr)
-                await ShareTrackUniversalAsync(tr);
-        };
-
         NowPlayingArtistBtn.Click += async (_, _) =>
         {
             var a = _audio.CurrentTrack?.Artists.FirstOrDefault();
@@ -833,20 +826,20 @@ public partial class MainWindow : Window
 
         SeekSlider.PropertyChanged += (_, e) =>
         {
-            if (e.Property == RangeBase.ValueProperty) HandleUserSliderSeek(SeekSlider.Value);
+            if (e.Property == SeekProgressControl.ValueProperty) HandleUserSliderSeek(SeekSlider.Value);
         };
         FsSeekSlider.PropertyChanged += (_, e) =>
         {
-            if (e.Property == RangeBase.ValueProperty) HandleUserSliderSeek(FsSeekSlider.Value);
+            if (e.Property == SeekProgressControl.ValueProperty) HandleUserSliderSeek(FsSeekSlider.Value);
         };
         MiniSeekSlider.PropertyChanged += (_, e) =>
         {
-            if (e.Property == RangeBase.ValueProperty) HandleUserSliderSeek(MiniSeekSlider.Value);
+            if (e.Property == SeekProgressControl.ValueProperty) HandleUserSliderSeek(MiniSeekSlider.Value);
         };
 
         VolumeSlider.PropertyChanged += (_, e) =>
         {
-            if (e.Property == RangeBase.ValueProperty && !_volByCode)
+            if (e.Property == SeekProgressControl.ValueProperty && !_volByCode)
                 _audio.SetVolume(VolumeSlider.Value);
         };
 
@@ -1901,8 +1894,17 @@ public partial class MainWindow : Window
         // Wheel-over controls tunes that exact control; the three song-seek sliders remain exempt.
         for (var probe = current; probe is not null; probe = probe.Parent as Control)
         {
+            if (probe is SeekProgressControl progressControl)
+            {
+                if (progressControl == VolumeSlider && Math.Abs(e.Delta.Y) >= 0.01)
+                {
+                    double volumeStep = Math.Max(0.02, (progressControl.Maximum - progressControl.Minimum) * 0.05);
+                    progressControl.Value = Math.Clamp(progressControl.Value + Math.Sign(e.Delta.Y) * volumeStep, progressControl.Minimum, progressControl.Maximum);
+                    e.Handled = true;
+                }
+                return;
+            }
             if (probe is not Slider slider) continue;
-            if (slider == SeekSlider || slider == FsSeekSlider || slider == MiniSeekSlider) break;
             if (Math.Abs(e.Delta.Y) < 0.01) return;
             double range = Math.Max(0.01, slider.Maximum - slider.Minimum);
             double step = range * 0.035;
@@ -2014,27 +2016,31 @@ public partial class MainWindow : Window
 
         foreach (var button in LeftSidebarBorder.GetVisualDescendants().OfType<Button>())
         {
-            button.HorizontalContentAlignment = compact ? HorizontalAlignment.Center : HorizontalAlignment.Stretch;
+            button.HorizontalContentAlignment = HorizontalAlignment.Stretch;
             if (button.Content is StackPanel row)
-                row.HorizontalAlignment = compact ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+                row.HorizontalAlignment = HorizontalAlignment.Left;
 
             if (button.Content is not Grid grid) continue;
             bool playlistOrLiked = button == NavLikedBtn || SidebarPlaylistsPanel.Children.Contains(button);
             bool downloads = button == NavDownloadsBtn;
             if (compact && (playlistOrLiked || downloads))
             {
-                // The leading artwork/icon gets the full compact cell; labels/counts are hidden.
-                grid.ColumnDefinitions = ColumnDefinitions.Parse("*,0,0");
+                // Use a fixed 40-DIP artwork cell; a parallel fast translation eases each icon into its true center.
+                grid.Width = playlistOrLiked ? 40 : double.NaN;
+                grid.HorizontalAlignment = HorizontalAlignment.Left;
+                grid.ColumnDefinitions = ColumnDefinitions.Parse("Auto,0,0");
                 foreach (var child in grid.Children)
                 {
                     Grid.SetColumn(child, 0);
-                    child.HorizontalAlignment = HorizontalAlignment.Center;
+                    child.HorizontalAlignment = playlistOrLiked ? HorizontalAlignment.Center : HorizontalAlignment.Left;
                     if (child is Border cover) cover.Margin = new Thickness(0);
                     if (child is PathIcon icon) icon.Margin = new Thickness(0);
                 }
             }
             else if (!compact && (playlistOrLiked || downloads))
             {
+                grid.Width = double.NaN;
+                grid.HorizontalAlignment = HorizontalAlignment.Stretch;
                 grid.ColumnDefinitions = ColumnDefinitions.Parse(downloads ? "Auto,*,Auto" : "40,*,Auto");
                 int restoredColumn = 0;
                 foreach (var child in grid.Children)
@@ -2045,6 +2051,56 @@ public partial class MainWindow : Window
                     if (child is PathIcon icon) icon.Margin = downloads ? new Thickness(0, 0, 12, 0) : new Thickness(0);
                 }
             }
+        }
+
+        PlaylistSectionHeaderGrid.Margin = compact ? new Thickness(0, 0, 0, 4) : new Thickness(12, 0, 4, 4);
+        PlaylistSectionHeaderGrid.ColumnDefinitions = ColumnDefinitions.Parse("*,Auto");
+        bool centerCreateButton = compact && !_sidebarCompactAnimationPending;
+        Grid.SetColumn(CreatePlaylistSideBtn, centerCreateButton ? 0 : 1);
+        Grid.SetColumnSpan(CreatePlaylistSideBtn, centerCreateButton ? 2 : 1);
+        CreatePlaylistSideBtn.HorizontalAlignment = centerCreateButton ? HorizontalAlignment.Center : HorizontalAlignment.Right;
+        CreatePlaylistSideBtn.Width = centerCreateButton ? 40 : double.NaN;
+        CreatePlaylistSideBtn.Height = centerCreateButton ? 40 : double.NaN;
+        CreatePlaylistSideBtn.Padding = centerCreateButton ? new Thickness(0) : new Thickness(5, 3);
+
+        ApplySidebarContentOffset(_sidebarContentOffsetAnimating ? _sidebarContentOffsetProgress : (compact ? 1 : 0));
+    }
+
+    private double GetCompactContentOffset(Button button)
+    {
+        const double compactButtonWidth = 48; // 76-wide column minus sidebar margin and padding.
+        double contentWidth;
+        if (button == NavLikedBtn || SidebarPlaylistsPanel.Children.Contains(button))
+        {
+            contentWidth = 40;
+        }
+        else if (button.Content is StackPanel row && row.Children.OfType<PathIcon>().FirstOrDefault() is { } icon)
+        {
+            contentWidth = double.IsFinite(icon.Width) && icon.Width > 0 ? icon.Width : icon.Bounds.Width;
+        }
+        else if (button.Content is Grid grid && grid.Children.OfType<PathIcon>().FirstOrDefault() is { } gridIcon)
+        {
+            contentWidth = double.IsFinite(gridIcon.Width) && gridIcon.Width > 0 ? gridIcon.Width : gridIcon.Bounds.Width;
+        }
+        else return 0;
+
+        double innerWidth = Math.Max(0, compactButtonWidth - button.Padding.Left - button.Padding.Right);
+        return (innerWidth - contentWidth) / 2.0;
+    }
+
+    private void ApplySidebarContentOffset(double progress)
+    {
+        progress = Math.Clamp(progress, 0, 1);
+        foreach (var button in LeftSidebarBorder.GetVisualDescendants().OfType<Button>())
+        {
+            if (button.Content is not Control content) continue;
+            var transform = content.RenderTransform as TranslateTransform;
+            if (transform is null)
+            {
+                transform = new TranslateTransform();
+                content.RenderTransform = transform;
+            }
+            transform.X = GetCompactContentOffset(button) * progress;
         }
     }
 
@@ -2063,6 +2119,9 @@ public partial class MainWindow : Window
 
     internal void ApplyLeftSidebarMode(string? mode = null, bool animate = true, bool rerenderSettings = true)
     {
+        double currentContentProgress = _sidebarContentOffsetAnimating
+            ? _sidebarContentOffsetProgress
+            : (_leftSidebarMode == "Compact" ? 1 : 0);
         _leftSidebarMode = NormalizeSidebarMode(mode ?? _store.Settings.LeftSidebarMode);
         _store.Settings.LeftSidebarMode = _leftSidebarMode;
         _leftSidebarOpen = _leftSidebarMode != "Hidden";
@@ -2071,15 +2130,12 @@ public partial class MainWindow : Window
         LeftSidebarBorder.IsHitTestVisible = _leftSidebarOpen;
         LeftSidebarBorder.Padding = new Thickness(10, 12);
         LeftSidebarBorder.Margin = _leftSidebarMode == "Hidden" ? new Thickness(0) : new Thickness(0, 0, 8, 0);
+        _sidebarCompactAnimationPending = animate && compact;
+        _sidebarContentOffsetFrom = currentContentProgress;
+        _sidebarContentOffsetTo = compact ? 1 : 0;
+        _sidebarContentOffsetAnimating = animate && Math.Abs(_sidebarContentOffsetTo - _sidebarContentOffsetFrom) > 0.001;
+        _sidebarContentOffsetProgress = _sidebarContentOffsetAnimating ? _sidebarContentOffsetFrom : _sidebarContentOffsetTo;
         UpdateSidebarCompactVisuals();
-        PlaylistSectionHeaderGrid.Margin = compact ? new Thickness(0, 0, 0, 4) : new Thickness(12, 0, 4, 4);
-        PlaylistSectionHeaderGrid.ColumnDefinitions = ColumnDefinitions.Parse("*,Auto");
-        Grid.SetColumn(CreatePlaylistSideBtn, compact ? 0 : 1);
-        Grid.SetColumnSpan(CreatePlaylistSideBtn, compact ? 2 : 1);
-        CreatePlaylistSideBtn.HorizontalAlignment = compact ? HorizontalAlignment.Center : HorizontalAlignment.Right;
-        CreatePlaylistSideBtn.Width = compact ? 40 : double.NaN;
-        CreatePlaylistSideBtn.Height = compact ? 40 : double.NaN;
-        CreatePlaylistSideBtn.Padding = compact ? new Thickness(0) : new Thickness(5, 3);
         string behaviorTip = _store.Settings.SidebarCollapseBehavior switch
         {
             "Stepwise" when compact => "Compact sidebar (click to hide)",
@@ -2119,6 +2175,13 @@ public partial class MainWindow : Window
         if (Math.Abs(start - target) < 0.5)
         {
             column.Width = new GridLength(target);
+            if (leftSidebar)
+            {
+                _sidebarCompactAnimationPending = false;
+                _sidebarContentOffsetAnimating = false;
+                _sidebarContentOffsetProgress = _sidebarContentOffsetTo;
+                UpdateSidebarCompactVisuals();
+            }
             return;
         }
 
@@ -2135,11 +2198,23 @@ public partial class MainWindow : Window
             double progress = Math.Clamp((DateTime.UtcNow - started).TotalMilliseconds / 190.0, 0, 1);
             double eased = 1 - Math.Pow(1 - progress, 3);
             column.Width = new GridLength(start + (target - start) * eased);
+            if (leftSidebar && _sidebarContentOffsetAnimating)
+            {
+                _sidebarContentOffsetProgress = _sidebarContentOffsetFrom + (_sidebarContentOffsetTo - _sidebarContentOffsetFrom) * eased;
+                ApplySidebarContentOffset(_sidebarContentOffsetProgress);
+            }
             if (progress < 1) return;
 
             column.Width = new GridLength(target);
             timer!.Stop();
-            if (leftSidebar) _leftSidebarAnimation = null;
+            if (leftSidebar)
+            {
+                _leftSidebarAnimation = null;
+                _sidebarCompactAnimationPending = false;
+                _sidebarContentOffsetAnimating = false;
+                _sidebarContentOffsetProgress = _sidebarContentOffsetTo;
+                UpdateSidebarCompactVisuals();
+            }
             else
             {
                 _rightSidebarAnimation = null;
@@ -3913,8 +3988,8 @@ public partial class MainWindow : Window
                     StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
                     GradientStops = new GradientStops
                     {
-                        new GradientStop(Color.FromArgb(168, color.R, color.G, color.B), 0),
-                        new GradientStop(Color.FromArgb(78, color.R, color.G, color.B), 0.52),
+                        new GradientStop(Color.FromArgb(188, color.R, color.G, color.B), 0),
+                        new GradientStop(Color.FromArgb(142, color.R, color.G, color.B), 0.62),
                         new GradientStop(ThemeManager.GetPalette(_store.Settings.Theme).BgCard, 1),
                     },
                 };
@@ -4709,7 +4784,11 @@ public partial class MainWindow : Window
             Padding = new Thickness(6),
             Opacity = 0,
             IsHitTestVisible = false,
-            Content = new PathIcon { Data = Icons.More, Width = 14, Height = 14 },
+            Transitions = new Transitions
+            {
+                new DoubleTransition { Property = OpacityProperty, Duration = TimeSpan.FromMilliseconds(110) }
+            },
+            Content = new PathIcon { Data = Icons.MoreHorizontal, Width = 16, Height = 16 },
         };
         btn.Click += (_, ev) =>
         {
@@ -4736,37 +4815,114 @@ public partial class MainWindow : Window
         }, RoutingStrategies.Bubble, handledEventsToo: true);
     }
 
+    private MenuItem BuildIconMenuItem(string label, Geometry? icon = null, IBrush? iconForeground = null)
+    {
+        var item = new MenuItem
+        {
+            Padding = new Thickness(8, 4),
+            MinHeight = 31,
+            Foreground = ResBrush("TextPrimaryBrush"),
+            FontSize = 13,
+            FontWeight = FontWeight.Medium,
+            Header = new TextBlock
+            {
+                Text = label,
+                FontSize = 13,
+                FontWeight = FontWeight.Medium,
+                Foreground = ResBrush("TextPrimaryBrush"),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+            }
+        };
+        if (icon is not null)
+        {
+            item.Icon = new PathIcon
+            {
+                Data = icon,
+                Width = 15,
+                Height = 15,
+                Foreground = iconForeground ?? ResBrush("TextSecondaryBrush"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+        }
+        return item;
+    }
+
+    private Control BuildLikedSongsMenuIcon()
+    {
+        return new Border
+        {
+            Width = 16,
+            Height = 16,
+            CornerRadius = new CornerRadius(2),
+            ClipToBounds = true,
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                GradientStops = new GradientStops
+                {
+                    new GradientStop(Color.Parse("#450AF5"), 0),
+                    new GradientStop(Color.Parse("#1ED760"), 1),
+                }
+            },
+            Child = new PathIcon
+            {
+                Data = Icons.HeartFilled,
+                Width = 10,
+                Height = 10,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            }
+        };
+    }
+
+    private static void AddMenuDivider(ContextMenu menu)
+    {
+        if (menu.Items.Count > 0 && menu.Items[^1] is not Separator)
+            menu.Items.Add(new Separator
+            {
+                Height = 1,
+                MinHeight = 1,
+                Margin = new Thickness(8, 2),
+                Opacity = 0.48,
+                IsHitTestVisible = false,
+                Focusable = false,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            });
+    }
+
+    private static Color MixColor(Color baseColor, Color tintColor, double tintAmount)
+    {
+        double amount = Math.Clamp(tintAmount, 0, 1);
+        return Color.FromRgb(
+            (byte)Math.Round(baseColor.R * (1 - amount) + tintColor.R * amount),
+            (byte)Math.Round(baseColor.G * (1 - amount) + tintColor.G * amount),
+            (byte)Math.Round(baseColor.B * (1 - amount) + tintColor.B * amount));
+    }
+
     private ContextMenu BuildTrackContextMenu(TrackItem tr, LocalPlaylist? localOwner = null)
     {
-        var menu = new ContextMenu();
-        var mPlayNext = new MenuItem { Header = "Play Next" };
-        mPlayNext.Click += (_, _) => _audio.PlayNextInQueue(tr);
-        menu.Items.Add(mPlayNext);
-        var mAddQ = new MenuItem { Header = "Add to Queue" };
-        mAddQ.Click += (_, _) => _audio.AddToQueue(tr);
-        menu.Items.Add(mAddQ);
-
-        if (!tr.IsLocal)
+        var palette = ThemeManager.GetPalette(_store.Settings.Theme);
+        var menu = new ContextMenu
         {
-            var mRadio = new MenuItem { Header = "Start Song Radio" };
-            mRadio.Click += async (_, _) =>
-            {
-                ShowToast($"Starting Radio from \"{tr.Title}\"...");
-                var r = await _yt.GetRadioQueueAsync(tr.Id);
-                r = r.Where(x => (!_store.Settings.HideVideoSongs || !x.IsVideo) && !_store.IsTrackExcluded(x)).ToList();
-                if (r.Count > 0) await _audio.PlayQueueAsync(r, 0, autoRadioIfSingle: false);
-            };
-            menu.Items.Add(mRadio);
-        }
+            MinWidth = 0,
+            Background = new SolidColorBrush(MixColor(palette.BgSurface, palette.Accent, palette.IsDark ? 0 : 0.07)),
+            BorderBrush = new SolidColorBrush(palette.BorderSubtle),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(9),
+        };
 
-        var addToPlMenu = new MenuItem { Header = "Add to Playlist" };
-        var newPlItem = new MenuItem { Header = "+ Create New Playlist..." };
+        var addToPlMenu = BuildIconMenuItem("Add to Playlist", Icons.Plus);
+        var newPlItem = BuildIconMenuItem("Create New Playlist…", Icons.Plus);
         newPlItem.Click += (_, _) => OpenNewPlaylistModal(tr);
         addToPlMenu.Items.Add(newPlItem);
         foreach (var pl in _store.Playlists)
         {
             var cpl = pl;
-            var pi = new MenuItem { Header = cpl.Name };
+            var pi = BuildIconMenuItem(cpl.Name, Icons.Library);
             pi.Click += (_, _) =>
             {
                 bool added = _store.AddTrackToPlaylist(cpl.Id, tr);
@@ -4778,7 +4934,7 @@ public partial class MainWindow : Window
 
         if (localOwner is not null)
         {
-            var rmItem = new MenuItem { Header = $"Remove from {localOwner.Name}" };
+            var rmItem = BuildIconMenuItem($"Remove from {localOwner.Name}", Icons.Trash);
             rmItem.Click += (_, _) =>
             {
                 _store.RemoveTrackFromPlaylist(localOwner.Id, tr.Id);
@@ -4787,28 +4943,50 @@ public partial class MainWindow : Window
             menu.Items.Add(rmItem);
         }
 
-        if (tr.Artists.FirstOrDefault()?.Id is { Length: > 0 } aid)
+        bool isLiked = _store.IsLiked(tr.Id);
+        var likeItem = BuildIconMenuItem(isLiked ? "Remove from Liked Songs" : "Add to Liked Songs");
+        likeItem.Icon = BuildLikedSongsMenuIcon();
+        likeItem.Click += (_, _) =>
         {
-            var goArt = new MenuItem { Header = "Go to Artist" };
-            goArt.Click += async (_, _) => await NavigateToAsync("artist:" + aid, () => LoadArtistDetailAsync(aid));
-            menu.Items.Add(goArt);
-        }
-        if (tr.Album?.Id is { Length: > 0 } albid)
+            bool liked = _store.ToggleLike(tr, _yt);
+            ShowToast(liked ? "Added to Liked Songs" : "Removed from Liked Songs");
+            UpdateNowPlayingUi();
+            if (_dockOpen && _dockTab == "now") RenderRightDock();
+        };
+        menu.Items.Add(likeItem);
+
+        AddMenuDivider(menu);
+        var mAddQ = BuildIconMenuItem("Add to Queue", Icons.Queue);
+        mAddQ.Click += (_, _) => _audio.AddToQueue(tr);
+        menu.Items.Add(mAddQ);
+        var mPlayNext = BuildIconMenuItem("Play Next", Icons.Next);
+        mPlayNext.Click += (_, _) => _audio.PlayNextInQueue(tr);
+        menu.Items.Add(mPlayNext);
+
+        if (!tr.IsLocal)
         {
-            var goAlb = new MenuItem { Header = "Go to Album" };
-            goAlb.Click += async (_, _) => await NavigateToAsync("album:" + albid, () => LoadAlbumDetailAsync(albid));
-            menu.Items.Add(goAlb);
+            AddMenuDivider(menu);
+            var mRadio = BuildIconMenuItem("Go to Song Radio", Icons.Radio);
+            mRadio.Click += async (_, _) =>
+            {
+                ShowToast($"Starting Radio from \"{tr.Title}\"...");
+                var r = await _yt.GetRadioQueueAsync(tr.Id);
+                r = r.Where(x => (!_store.Settings.HideVideoSongs || !x.IsVideo) && !_store.IsTrackExcluded(x)).ToList();
+                if (r.Count > 0) await _audio.PlayQueueAsync(r, 0, autoRadioIfSingle: false);
+            };
+            menu.Items.Add(mRadio);
         }
 
-        var excludeMenu = new MenuItem { Header = "Exclude from discovery" };
+        AddMenuDivider(menu);
+        var excludeMenu = BuildIconMenuItem("Exclude from discovery", Icons.ShieldCheck);
         bool trackExcluded = _store.IsContentExcluded("track", tr.Id, tr.Title);
-        var trackExclusion = new MenuItem { Header = trackExcluded ? "Restore song to discovery" : "Never recommend this song" };
+        var trackExclusion = BuildIconMenuItem(trackExcluded ? "Restore song to discovery" : "Exclude this song", Icons.Close);
         trackExclusion.Click += (_, _) => ToggleDiscoveryExclusion("track", tr.Id, tr.Title, tr.ArtistNames);
         excludeMenu.Items.Add(trackExclusion);
         if (tr.Album is { } menuAlbum)
         {
             bool albumExcluded = _store.IsContentExcluded("album", menuAlbum.Id, menuAlbum.Name);
-            var albumExclusion = new MenuItem { Header = albumExcluded ? $"Restore album: {menuAlbum.Name}" : $"Exclude album: {menuAlbum.Name}" };
+            var albumExclusion = BuildIconMenuItem(albumExcluded ? $"Restore album: {menuAlbum.Name}" : $"Exclude album: {menuAlbum.Name}", Icons.Library);
             albumExclusion.Click += (_, _) => ToggleDiscoveryExclusion("album", menuAlbum.Id, menuAlbum.Name, tr.ArtistNames);
             excludeMenu.Items.Add(albumExclusion);
         }
@@ -4816,13 +4994,27 @@ public partial class MainWindow : Window
         {
             var capturedArtist = artist;
             bool artistExcluded = _store.IsContentExcluded("artist", capturedArtist.Id, capturedArtist.Name);
-            var artistExclusion = new MenuItem { Header = artistExcluded ? $"Unblock artist: {capturedArtist.Name}" : $"Block artist: {capturedArtist.Name}" };
+            var artistExclusion = BuildIconMenuItem(artistExcluded ? $"Unblock artist: {capturedArtist.Name}" : $"Exclude artist: {capturedArtist.Name}", Icons.User);
             artistExclusion.Click += (_, _) => ToggleDiscoveryExclusion("artist", capturedArtist.Id, capturedArtist.Name, "Artist");
             excludeMenu.Items.Add(artistExclusion);
         }
         menu.Items.Add(excludeMenu);
 
-        var mShare = new MenuItem { Header = "Copy Universal Share Link (song.link)" };
+        if (tr.Artists.FirstOrDefault()?.Id is { Length: > 0 } aid)
+        {
+            var goArt = BuildIconMenuItem("Go to Artist", Icons.User);
+            goArt.Click += async (_, _) => await NavigateToAsync("artist:" + aid, () => LoadArtistDetailAsync(aid));
+            menu.Items.Add(goArt);
+        }
+        if (tr.Album?.Id is { Length: > 0 } albid)
+        {
+            var goAlb = BuildIconMenuItem("Go to Album", Icons.Library);
+            goAlb.Click += async (_, _) => await NavigateToAsync("album:" + albid, () => LoadAlbumDetailAsync(albid));
+            menu.Items.Add(goAlb);
+        }
+
+        AddMenuDivider(menu);
+        var mShare = BuildIconMenuItem("Share", Icons.Share);
         mShare.Click += async (_, _) => await ShareTrackUniversalAsync(tr);
         menu.Items.Add(mShare);
         return menu;

@@ -82,6 +82,7 @@ internal sealed class Win32WaveOut16Player : IDisposable
     private readonly IntPtr[] _hdrPtrs = new IntPtr[BufferCount];
     private readonly IntPtr[] _dataPtrs = new IntPtr[BufferCount];
     private readonly bool[] _queued = new bool[BufferCount];
+    private readonly object _queueLock = new();
     private IntPtr _hWaveOut;
     private Thread? _pumpThread;
     private volatile bool _running;
@@ -163,58 +164,61 @@ internal sealed class Win32WaveOut16Player : IDisposable
         while (_running)
         {
             bool wroteAny = false;
-            for (int i = 0; i < BufferCount && _running; i++)
+            lock (_queueLock)
             {
-                if (_queued[i])
+                for (int i = 0; i < BufferCount && _running; i++)
                 {
-                    uint flags = (uint)Marshal.ReadInt32(_hdrPtrs[i], flagsOffset);
-                    if ((flags & WHDR_DONE) == 0)
-                        continue;
-
-                    // Strictly follow Microsoft Win32 wdmaud contract: Unprepare completed header before refilling!
-                    try { waveOutUnprepareHeader(_hWaveOut, _hdrPtrs[i], hdrSize); } catch { }
-                    _queued[i] = false;
-                }
-
-                int got = 0;
-                try { got = _source.Read(floatBuf, 0, SamplesPerBuffer); } catch { got = 0; }
-                for (int s = 0; s < SamplesPerBuffer; s++)
-                {
-                    float v = s < got ? floatBuf[s] : 0f;
-                    if (float.IsNaN(v) || float.IsInfinity(v)) v = 0f;
-
-                    // Fast Xorshift32 TPDF dither (±0.5 LSB) eliminates 16-bit quantization distortion
-                    ditherState ^= ditherState << 13;
-                    ditherState ^= ditherState >> 17;
-                    ditherState ^= ditherState << 5;
-                    float r1 = (ditherState & 0xFFFFu) * (1.0f / 65536.0f);
-                    float r2 = ((ditherState >> 16) & 0xFFFFu) * (1.0f / 65536.0f);
-                    float dither = (r1 - r2) * 0.5f;
-
-                    int scaled = (int)MathF.Round(v * 32766f + dither);
-                    shortBuf[s] = (short)(scaled > 32767 ? 32767 : (scaled < -32768 ? -32768 : scaled));
-                }
-
-                Marshal.Copy(shortBuf, 0, _dataPtrs[i], SamplesPerBuffer);
-                var freshHdr = new WAVEHDR { lpData = _dataPtrs[i], dwBufferLength = BytesPerBuffer };
-                Marshal.StructureToPtr(freshHdr, _hdrPtrs[i], false);
-
-                int prc = waveOutPrepareHeader(_hWaveOut, _hdrPtrs[i], hdrSize);
-                int wrc = prc == 0 ? waveOutWrite(_hWaveOut, _hdrPtrs[i], hdrSize) : prc;
-                if (wrc == 0)
-                {
-                    _queued[i] = true;
-                    wroteAny = true;
-                    consecutiveErrors = 0;
-                    Interlocked.Increment(ref _blocksSubmitted);
-                }
-                else
-                {
-                    _queued[i] = false;
-                    if (++consecutiveErrors > 25)
+                    if (_queued[i])
                     {
-                        _running = false;
-                        return;
+                        uint flags = (uint)Marshal.ReadInt32(_hdrPtrs[i], flagsOffset);
+                        if ((flags & WHDR_DONE) == 0)
+                            continue;
+
+                        // Strictly follow Microsoft Win32 wdmaud contract: Unprepare completed header before refilling!
+                        try { waveOutUnprepareHeader(_hWaveOut, _hdrPtrs[i], hdrSize); } catch { }
+                        _queued[i] = false;
+                    }
+
+                    int got = 0;
+                    try { got = _source.Read(floatBuf, 0, SamplesPerBuffer); } catch { got = 0; }
+                    for (int sample = 0; sample < SamplesPerBuffer; sample++)
+                    {
+                        float v = sample < got ? floatBuf[sample] : 0f;
+                        if (float.IsNaN(v) || float.IsInfinity(v)) v = 0f;
+
+                        // Fast Xorshift32 TPDF dither (±0.5 LSB) eliminates 16-bit quantization distortion
+                        ditherState ^= ditherState << 13;
+                        ditherState ^= ditherState >> 17;
+                        ditherState ^= ditherState << 5;
+                        float r1 = (ditherState & 0xFFFFu) * (1.0f / 65536.0f);
+                        float r2 = ((ditherState >> 16) & 0xFFFFu) * (1.0f / 65536.0f);
+                        float dither = (r1 - r2) * 0.5f;
+
+                        int scaled = (int)MathF.Round(v * 32766f + dither);
+                        shortBuf[sample] = (short)(scaled > 32767 ? 32767 : (scaled < -32768 ? -32768 : scaled));
+                    }
+
+                    Marshal.Copy(shortBuf, 0, _dataPtrs[i], SamplesPerBuffer);
+                    var freshHdr = new WAVEHDR { lpData = _dataPtrs[i], dwBufferLength = BytesPerBuffer };
+                    Marshal.StructureToPtr(freshHdr, _hdrPtrs[i], false);
+
+                    int prc = waveOutPrepareHeader(_hWaveOut, _hdrPtrs[i], hdrSize);
+                    int wrc = prc == 0 ? waveOutWrite(_hWaveOut, _hdrPtrs[i], hdrSize) : prc;
+                    if (wrc == 0)
+                    {
+                        _queued[i] = true;
+                        wroteAny = true;
+                        consecutiveErrors = 0;
+                        Interlocked.Increment(ref _blocksSubmitted);
+                    }
+                    else
+                    {
+                        _queued[i] = false;
+                        if (++consecutiveErrors > 25)
+                        {
+                            _running = false;
+                            return;
+                        }
                     }
                 }
             }
@@ -222,6 +226,24 @@ internal sealed class Win32WaveOut16Player : IDisposable
             if (!wroteAny && _running)
                 _callbackEvent.WaitOne(25);
         }
+    }
+
+    /// <summary>Immediately discard already-submitted audio when pausing or switching tracks.</summary>
+    public void FlushQueuedAudio()
+    {
+        lock (_queueLock)
+        {
+            if (_hWaveOut == IntPtr.Zero) return;
+            try { waveOutReset(_hWaveOut); } catch { }
+            int hdrSize = Marshal.SizeOf<WAVEHDR>();
+            for (int i = 0; i < BufferCount; i++)
+            {
+                if (_hdrPtrs[i] != IntPtr.Zero)
+                    try { waveOutUnprepareHeader(_hWaveOut, _hdrPtrs[i], hdrSize); } catch { }
+                _queued[i] = false;
+            }
+        }
+        try { _callbackEvent.Set(); } catch { }
     }
 
     public void Dispose()
@@ -614,7 +636,8 @@ public sealed class EchoMasterMixer : ISampleProvider
     internal double CrossfadeRemainingSec;
     internal double CrossfadeTotalSec;
 
-    public bool IsPaused { get; set; } = true;
+    private volatile bool _isPaused = true;
+    public bool IsPaused { get => _isPaused; set => _isPaused = value; }
     public float MasterVolume { get; set; } = 0.85f;
     public bool IsMuted { get; set; }
     public bool NormalizeLoudness { get; set; } = true;
@@ -1106,6 +1129,8 @@ public sealed class AudioEngine : IDisposable
     public void PlayTestChime() => _mixer.TriggerTestChime();
     public List<(int Id, string Name)> GetOutputDevices() => Win32WaveOut16Player.EnumerateDevices();
     private CancellationTokenSource? _loadCts;
+    private readonly object _loadStateLock = new();
+    private int _trackLoadGeneration;
     private Task<DeckState?>? _prewarmedNextTask;
     private string? _prewarmedNextId;
     private string? _lightPrewarmNextId;
@@ -1562,24 +1587,42 @@ public sealed class AudioEngine : IDisposable
 
     public void TogglePlayPause()
     {
+        if (IsLoading) return;
         if (_mixer.PrimaryDeck is null)
         {
             if (CurrentTrack is not null) _ = LoadCurrentTrackAsync();
             return;
         }
-        _mixer.IsPaused = !_mixer.IsPaused;
+        bool pause = !_mixer.IsPaused;
+        _mixer.IsPaused = pause;
+        if (pause) FlushQueuedOutput();
         StateChanged?.Invoke();
+    }
+
+    private void FlushQueuedOutput()
+    {
+        try { _win32WaveOut?.FlushQueuedAudio(); } catch { }
+        if (_waveOut is { PlaybackState: PlaybackState.Playing } wave)
+        {
+            try
+            {
+                wave.Stop();
+                wave.Play(); // The mixer is paused, so restarted buffers contain silence until playback resumes.
+            }
+            catch { }
+        }
     }
 
     public void Pause()
     {
         _mixer.IsPaused = true;
+        FlushQueuedOutput();
         StateChanged?.Invoke();
     }
 
     public void Resume()
     {
-        if (_mixer.PrimaryDeck is not null)
+        if (!IsLoading && _mixer.PrimaryDeck is not null)
         {
             _mixer.IsPaused = false;
             StateChanged?.Invoke();
@@ -1588,10 +1631,22 @@ public sealed class AudioEngine : IDisposable
 
     public void Stop()
     {
-        _mixer.IsPaused = true;
-        var old = _mixer.PrimaryDeck;
-        _mixer.PrimaryDeck = null;
+        DeckState? old;
+        DeckState? fading;
+        lock (_loadStateLock)
+        {
+            _loadCts?.Cancel();
+            _trackLoadGeneration++;
+            IsLoading = false;
+            _mixer.IsPaused = true;
+            old = _mixer.PrimaryDeck;
+            fading = _mixer.CrossfadeOutDeck;
+            _mixer.PrimaryDeck = null;
+            _mixer.CrossfadeOutDeck = null;
+        }
+        FlushQueuedOutput();
         old?.Dispose();
+        fading?.Dispose();
         StateChanged?.Invoke();
     }
 
@@ -1744,9 +1799,12 @@ public sealed class AudioEngine : IDisposable
 
     private async Task PerformCrossfadeAdvanceAsync(int nextIdx, int xfadeSec)
     {
+        int generation = Volatile.Read(ref _trackLoadGeneration);
+        string? outgoingTrackId = CurrentTrack?.Id;
         try
         {
             RecordCurrentHistoryIfAny();
+            if (nextIdx < 0 || nextIdx >= Queue.Count) return;
             var nextTrack = Queue[nextIdx];
             DeckState? nextDeck = null;
             if (_prewarmedNextId == nextTrack.Id && _prewarmedNextTask is not null)
@@ -1754,18 +1812,34 @@ public sealed class AudioEngine : IDisposable
             nextDeck ??= await BuildDeckAsync(nextTrack, CancellationToken.None);
             if (nextDeck is null) return;
 
-            CurrentIndex = nextIdx;
-            _prewarmedNextId = null;
-            _prewarmedNextTask = null;
-            _crossfadeTriggeredForTrack = false;
+            bool stale;
+            lock (_loadStateLock)
+            {
+                stale = generation != _trackLoadGeneration
+                    || IsLoading
+                    || _mixer.IsPaused
+                    || CurrentTrack?.Id != outgoingTrackId;
+                if (!stale)
+                {
+                    CurrentIndex = nextIdx;
+                    _prewarmedNextId = null;
+                    _prewarmedNextTask = null;
+                    _crossfadeTriggeredForTrack = false;
 
-            var oldPrimary = _mixer.PrimaryDeck;
-            _mixer.CrossfadeOutDeck?.Dispose();
-            _mixer.CrossfadeOutDeck = oldPrimary;
-            _mixer.CrossfadeTotalSec = xfadeSec;
-            _mixer.CrossfadeRemainingSec = xfadeSec;
-            _mixer.PrimaryDeck = nextDeck;
-            _mixer.IsPaused = false;
+                    var oldPrimary = _mixer.PrimaryDeck;
+                    _mixer.CrossfadeOutDeck?.Dispose();
+                    _mixer.CrossfadeOutDeck = oldPrimary;
+                    _mixer.CrossfadeTotalSec = xfadeSec;
+                    _mixer.CrossfadeRemainingSec = xfadeSec;
+                    _mixer.PrimaryDeck = nextDeck;
+                    _mixer.IsPaused = false;
+                }
+            }
+            if (stale)
+            {
+                nextDeck.Dispose();
+                return;
+            }
 
             TrackChanged?.Invoke(nextTrack);
             StateChanged?.Invoke();
@@ -1807,15 +1881,31 @@ public sealed class AudioEngine : IDisposable
         var track = CurrentTrack;
         if (track is null) return;
 
-        _loadCts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _loadCts = cts;
+        CancellationTokenSource cts;
+        int generation;
+        DeckState? outgoing;
+        DeckState? fading;
+        lock (_loadStateLock)
+        {
+            _loadCts?.Cancel();
+            cts = new CancellationTokenSource();
+            _loadCts = cts;
+            generation = ++_trackLoadGeneration;
+            IsLoading = true;
+            LastError = null;
+            _mixer.IsPaused = true;
+            outgoing = _mixer.PrimaryDeck;
+            fading = _mixer.CrossfadeOutDeck;
+            _mixer.PrimaryDeck = null;
+            _mixer.CrossfadeOutDeck = null;
+        }
         var ct = cts.Token;
 
-        IsLoading = true;
-        LastError = null;
-        // Pause the outgoing deck during manual track changes; keep its timeline out of the new song UI.
-        _mixer.IsPaused = true;
+        // Flush device buffers and detach the outgoing deck before resolving the next stream.
+        // This prevents both queued audio and a stale deck from leaking into the new selection.
+        FlushQueuedOutput();
+        outgoing?.Dispose();
+        fading?.Dispose();
         _mixer.ResetSpeedBuffer();
         _crossfadeTriggeredForTrack = false;
         _activeSkipSegments = new();
@@ -1823,7 +1913,6 @@ public sealed class AudioEngine : IDisposable
         TrackChanged?.Invoke(track);
         StateChanged?.Invoke();
 
-        // Fetch optional SponsorBlock segments in the background.
         if (!track.IsLocal && _store.Settings.SponsorBlockEnabled)
             FetchSponsorBlockSegments(track, ct);
 
@@ -1838,46 +1927,66 @@ public sealed class AudioEngine : IDisposable
             }
 
             newDeck ??= await BuildDeckAsync(track, ct);
-            if (ct.IsCancellationRequested)
+
+            bool stale;
+            lock (_loadStateLock)
+            {
+                stale = ct.IsCancellationRequested
+                    || generation != _trackLoadGeneration
+                    || !ReferenceEquals(_loadCts, cts);
+                if (!stale && newDeck is not null)
+                {
+                    if (track.DurationSeconds <= 0 && newDeck.DurationSeconds > 0)
+                    {
+                        track.DurationSeconds = (int)Math.Round(newDeck.DurationSeconds);
+                        track.DurationText = TrackItem.FormatSeconds(track.DurationSeconds);
+                    }
+
+                    var old = _mixer.PrimaryDeck;
+                    var oldFade = _mixer.CrossfadeOutDeck;
+                    _mixer.CrossfadeOutDeck = null;
+                    _mixer.ResetSpeedBuffer();
+                    _mixer.PrimaryDeck = newDeck;
+                    _mixer.IsPaused = false;
+                    old?.Dispose();
+                    oldFade?.Dispose();
+                    IsLoading = false;
+                }
+                else if (!stale)
+                {
+                    IsLoading = false;
+                    LastError = "Could not resolve an audio stream for this track.";
+                }
+            }
+
+            if (stale)
             {
                 newDeck?.Dispose();
                 return;
             }
-            if (newDeck is null)
-            {
-                IsLoading = false;
-                LastError = "Could not resolve an audio stream for this track.";
-                StateChanged?.Invoke();
-                return;
-            }
-
-            if (track.DurationSeconds <= 0 && newDeck.DurationSeconds > 0)
-            {
-                track.DurationSeconds = (int)Math.Round(newDeck.DurationSeconds);
-                track.DurationText = TrackItem.FormatSeconds(track.DurationSeconds);
-            }
-
-            var old = _mixer.PrimaryDeck;
-            _mixer.CrossfadeOutDeck?.Dispose();
-            _mixer.CrossfadeOutDeck = null;
-            _mixer.ResetSpeedBuffer();
-            _mixer.PrimaryDeck = newDeck;
-            _mixer.IsPaused = false;
-            old?.Dispose();
-
-            IsLoading = false;
             StateChanged?.Invoke();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // superseded by newer track selection
+            // A newer track selection or Stop superseded this request.
         }
         catch (Exception ex)
         {
-            IsLoading = false;
-            LastError = ex.Message;
-            ToastRequested?.Invoke($"Playback error: {ex.Message}");
-            StateChanged?.Invoke();
+            bool current;
+            lock (_loadStateLock)
+            {
+                current = generation == _trackLoadGeneration && ReferenceEquals(_loadCts, cts);
+                if (current)
+                {
+                    IsLoading = false;
+                    LastError = ex.Message;
+                }
+            }
+            if (current)
+            {
+                ToastRequested?.Invoke($"Playback error: {ex.Message}");
+                StateChanged?.Invoke();
+            }
         }
     }
 

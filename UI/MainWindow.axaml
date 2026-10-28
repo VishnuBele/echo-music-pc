@@ -554,14 +554,14 @@
             <Grid ColumnDefinitions="38,*,38" VerticalAlignment="Center" Margin="0,-3,0,0">
               <TextBlock Grid.Column="0" x:Name="PosTimeText" Text="0:00" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center"/>
               <Grid Grid.Column="1" Margin="6,0" VerticalAlignment="Center">
-                <Slider x:Name="SeekSlider" Classes="hoverThumb" Minimum="0" Maximum="100" Value="0" Margin="0"/>
+                <ui:SeekProgressControl x:Name="SeekSlider" Minimum="0" Maximum="100" Value="0" TrackBrush="{DynamicResource TextMutedBrush}" ProgressBrush="{DynamicResource AccentBrush}" HandleBrush="{DynamicResource AccentBrush}" Margin="0"/>
                 <ProgressBar x:Name="SeekLoadingBar" IsIndeterminate="True" IsVisible="False" Height="3" VerticalAlignment="Center" Margin="8,0"/>
               </Grid>
               <TextBlock Grid.Column="2" x:Name="DurTimeText" Text="0:00" FontSize="11" Foreground="{DynamicResource TextMutedBrush}" VerticalAlignment="Center" HorizontalAlignment="Right"/>
             </Grid>
           </StackPanel>
 
-          <!-- Right: Spectrum + Lyrics + Radio + Download + Share + Volume + Fullscreen -->
+          <!-- Right: Spectrum + Lyrics + Radio + Download + Volume + Fullscreen -->
           <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="3">
             <ui:SpectrumVisualizerControl x:Name="MiniBarSpectrum" Width="38" Height="18" BarCount="10" Margin="0,0,4,0"/>
             <Button x:Name="ToggleLyricsBarBtn" Classes="ghost" Padding="6" ToolTip.Tip="Lyrics">
@@ -573,13 +573,10 @@
             <Button x:Name="NowDownloadBtn" Classes="ghost" Padding="6" ToolTip.Tip="Download Offline">
               <PathIcon x:Name="NowDownloadIcon" Data="{x:Static ui:Icons.Download}" Width="15" Height="15"/>
             </Button>
-            <Button x:Name="ShareBarBtn" Classes="ghost" Padding="6" ToolTip.Tip="Share Song Link">
-              <PathIcon Data="{x:Static ui:Icons.Share}" Width="14" Height="14"/>
-            </Button>
             <Button x:Name="MuteBtn" Classes="ghost" Padding="6" ToolTip.Tip="Mute (M)">
               <PathIcon x:Name="VolumeIcon" Data="{x:Static ui:Icons.VolumeHigh}" Width="15" Height="15"/>
             </Button>
-            <Slider x:Name="VolumeSlider" Classes="hoverThumb" Width="80" Minimum="0" Maximum="1" Value="0.85" VerticalAlignment="Center"/>
+            <ui:SeekProgressControl x:Name="VolumeSlider" Width="80" Minimum="0" Maximum="1" Value="0.85" TrackBrush="{DynamicResource TextMutedBrush}" ProgressBrush="{DynamicResource AccentBrush}" HandleBrush="{DynamicResource AccentBrush}" VerticalAlignment="Center"/>
             <Button x:Name="FullscreenPlayerBtn" Classes="ghost" Padding="6" ToolTip.Tip="Fullscreen Player (F11)">
               <PathIcon Data="{x:Static ui:Icons.Expand}" Width="15" Height="15"/>
             </Button>
@@ -606,7 +603,7 @@
             <Button Grid.Column="0" x:Name="CloseFullscreenBtn" Classes="pill" Background="#28FFFFFF" BorderThickness="0" Foreground="White">
               <StackPanel Orientation="Horizontal" Spacing="6">
                 <PathIcon Data="{x:Static ui:Icons.ChevronLeft}" Width="13" Height="13" Foreground="White"/>
-                <TextBlock Text="Back (Esc)" FontSize="12.5" Foreground="White"/>
+                <TextBlock Text="Back" FontSize="12.5" Foreground="White"/>
               </StackPanel>
             </Button>
 
@@ -657,7 +654,7 @@
 
               <StackPanel Spacing="2">
                 <Grid VerticalAlignment="Center">
-                  <Slider x:Name="FsSeekSlider" Classes="hoverThumb" Minimum="0" Maximum="100" Value="0"/>
+                  <ui:SeekProgressControl x:Name="FsSeekSlider" Minimum="0" Maximum="100" Value="0" TrackBrush="#AAFFFFFF" ProgressBrush="{DynamicResource AccentBrush}" HandleBrush="{DynamicResource AccentBrush}"/>
                   <ProgressBar x:Name="FsSeekLoadingBar" IsIndeterminate="True" IsVisible="False" Height="3" VerticalAlignment="Center" Margin="8,0"/>
                 </Grid>
                 <Grid ColumnDefinitions="*,*">
@@ -718,7 +715,7 @@
           </StackPanel>
         </Grid>
         <Grid Grid.Row="1" Margin="0,4,0,0" VerticalAlignment="Center">
-          <Slider x:Name="MiniSeekSlider" Classes="hoverThumb" Minimum="0" Maximum="100" Value="0" Margin="0"/>
+          <ui:SeekProgressControl x:Name="MiniSeekSlider" Minimum="0" Maximum="100" Value="0" TrackBrush="{DynamicResource TextMutedBrush}" ProgressBrush="{DynamicResource AccentBrush}" HandleBrush="{DynamicResource AccentBrush}" Margin="0"/>
           <ProgressBar x:Name="MiniSeekLoadingBar" IsIndeterminate="True" IsVisible="False" Height="3" VerticalAlignment="Center" Margin="8,0"/>
         </Grid>
       </Grid>

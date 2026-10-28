@@ -24,7 +24,7 @@ OutFile "${OUT_FILE}"
 
 Section
   System::Call 'kernel32::GetCurrentProcessId() i .r0'
-  StrCpy $INSTDIR "$TEMP\EchoMusicSetup-v2.0.0-$0"
+  StrCpy $INSTDIR "$TEMP\EchoMusicSetup-v2.0.1-$0"
   SetOutPath "$INSTDIR"
   File /r "${CUSTOM_SETUP_DIR}\*.*"
   File /oname=EchoMusic-CoreSetup.exe "${CORE_SETUP}"

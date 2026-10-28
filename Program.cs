@@ -52,7 +52,7 @@ public static class Program
 
     private static async Task<int> RunHeadlessSelfTestAsync()
     {
-        Console.WriteLine("=== Echo Music v2.0.0 Native Engine End-to-End Self-Test ===");
+        Console.WriteLine("=== Echo Music v2.0.1 Native Engine End-to-End Self-Test ===");
 
         // [0/8] Verify C1-continuous SmoothLimit has ZERO step discontinuity across [-1.5, +1.5]
         float maxStep = 0f;

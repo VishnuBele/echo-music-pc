@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Media;
 
 namespace EchoMusic.UI;
@@ -42,6 +43,159 @@ public sealed class EchoWaveLogoControl : Control
             var pen = new Pen(new SolidColorBrush(WaveStroke), 1.75, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round);
             context.DrawGeometry(null, pen, WavePath);
         }
+    }
+}
+
+/// <summary>
+/// Minimal Spotify-style seek bar. Its progress line is always visible, while the circular
+/// seek handle appears only on hover or during a drag. Drawing it directly avoids platform-
+/// specific Fluent Slider thumb differences.
+/// </summary>
+public sealed class SeekProgressControl : Control
+{
+    public static readonly StyledProperty<double> MinimumProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(Minimum), 0);
+    public static readonly StyledProperty<double> MaximumProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(Maximum), 100);
+    public static readonly StyledProperty<double> ValueProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(Value), 0);
+    public static readonly StyledProperty<double> HandleScaleProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(HandleScale), 0);
+    public static readonly StyledProperty<IBrush?> TrackBrushProperty = AvaloniaProperty.Register<SeekProgressControl, IBrush?>(nameof(TrackBrush));
+    public static readonly StyledProperty<IBrush?> ProgressBrushProperty = AvaloniaProperty.Register<SeekProgressControl, IBrush?>(nameof(ProgressBrush));
+    public static readonly StyledProperty<IBrush?> HandleBrushProperty = AvaloniaProperty.Register<SeekProgressControl, IBrush?>(nameof(HandleBrush));
+
+    private bool _pointerOver;
+    private bool _dragging;
+
+    public double Minimum { get => GetValue(MinimumProperty); set => SetValue(MinimumProperty, value); }
+    public double Maximum { get => GetValue(MaximumProperty); set => SetValue(MaximumProperty, value); }
+    public double Value { get => GetValue(ValueProperty); set => SetValue(ValueProperty, value); }
+    public double HandleScale { get => GetValue(HandleScaleProperty); set => SetValue(HandleScaleProperty, value); }
+    public IBrush? TrackBrush { get => GetValue(TrackBrushProperty); set => SetValue(TrackBrushProperty, value); }
+    public IBrush? ProgressBrush { get => GetValue(ProgressBrushProperty); set => SetValue(ProgressBrushProperty, value); }
+    public IBrush? HandleBrush { get => GetValue(HandleBrushProperty); set => SetValue(HandleBrushProperty, value); }
+
+    public SeekProgressControl()
+    {
+        Focusable = true;
+        Cursor = new Cursor(StandardCursorType.Hand);
+        MinHeight = 18;
+        Transitions = new Avalonia.Animation.Transitions
+        {
+            new Avalonia.Animation.DoubleTransition
+            {
+                Property = HandleScaleProperty,
+                Duration = TimeSpan.FromMilliseconds(130),
+                Easing = new Avalonia.Animation.Easings.CubicEaseOut(),
+            }
+        };
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == ValueProperty || change.Property == MinimumProperty || change.Property == MaximumProperty ||
+            change.Property == TrackBrushProperty || change.Property == ProgressBrushProperty || change.Property == HandleBrushProperty ||
+            change.Property == HandleScaleProperty)
+            InvalidateVisual();
+    }
+
+    public override void Render(DrawingContext context)
+    {
+        base.Render(context);
+        double width = Bounds.Width;
+        double height = Bounds.Height;
+        if (width <= 2 || height <= 2) return;
+
+        const double sideInset = 6;
+        double trackWidth = Math.Max(0, width - sideInset * 2);
+        double centerY = height / 2;
+        double trackHeight = (_pointerOver || _dragging) ? 4.0 : 3.0;
+        double range = Math.Max(0.0001, Maximum - Minimum);
+        double ratio = Math.Clamp((Value - Minimum) / range, 0, 1);
+        double progressWidth = trackWidth * ratio;
+        var trackBrush = TrackBrush ?? new SolidColorBrush(Color.FromArgb(70, 255, 255, 255));
+        var progressBrush = ProgressBrush ?? Brushes.White;
+        var handleBrush = HandleBrush ?? progressBrush;
+
+        context.DrawRectangle(trackBrush, null,
+            new Rect(sideInset, centerY - trackHeight / 2, trackWidth, trackHeight), trackHeight / 2, trackHeight / 2);
+        if (progressWidth > 0.01)
+            context.DrawRectangle(progressBrush, null,
+                new Rect(sideInset, centerY - trackHeight / 2, progressWidth, trackHeight), trackHeight / 2, trackHeight / 2);
+
+        if (HandleScale > 0.005)
+        {
+            double radius = 5.5 * Math.Clamp(HandleScale, 0, 1);
+            double headX = sideInset + progressWidth;
+            context.DrawEllipse(handleBrush, null, new Point(headX, centerY), radius, radius);
+        }
+    }
+
+    protected override void OnPointerEntered(PointerEventArgs e)
+    {
+        base.OnPointerEntered(e);
+        _pointerOver = true;
+        HandleScale = 1;
+        InvalidateVisual();
+    }
+
+    protected override void OnPointerExited(PointerEventArgs e)
+    {
+        base.OnPointerExited(e);
+        _pointerOver = _dragging;
+        if (!_dragging) HandleScale = 0;
+        InvalidateVisual();
+    }
+
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
+    {
+        base.OnPointerPressed(e);
+        if (!IsEnabled || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        Focus();
+        _dragging = true;
+        _pointerOver = true;
+        HandleScale = 1;
+        e.Pointer.Capture(this);
+        SetValueFromPointer(e.GetPosition(this));
+        e.Handled = true;
+        InvalidateVisual();
+    }
+
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        base.OnPointerMoved(e);
+        if (_dragging) SetValueFromPointer(e.GetPosition(this));
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        base.OnPointerReleased(e);
+        if (!_dragging) return;
+        SetValueFromPointer(e.GetPosition(this));
+        _dragging = false;
+        var localPosition = e.GetPosition(this);
+        _pointerOver = localPosition.X >= 0 && localPosition.X <= Bounds.Width && localPosition.Y >= 0 && localPosition.Y <= Bounds.Height;
+        HandleScale = _pointerOver ? 1 : 0;
+        e.Pointer.Capture(null);
+        e.Handled = true;
+        InvalidateVisual();
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        double step = Math.Max(0.5, (Maximum - Minimum) / 100.0);
+        if (e.Key is Key.Left or Key.Down) Value = Math.Max(Minimum, Value - step);
+        else if (e.Key is Key.Right or Key.Up) Value = Math.Min(Maximum, Value + step);
+        else if (e.Key == Key.Home) Value = Minimum;
+        else if (e.Key == Key.End) Value = Maximum;
+        else return;
+        e.Handled = true;
+    }
+
+    private void SetValueFromPointer(Point position)
+    {
+        double width = Math.Max(1, Bounds.Width - 12);
+        double ratio = Math.Clamp((position.X - 6) / width, 0, 1);
+        Value = Minimum + ratio * (Maximum - Minimum);
     }
 }
 

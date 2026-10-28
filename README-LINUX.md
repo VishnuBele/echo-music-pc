@@ -1,10 +1,10 @@
-# Echo Music PC — Linux x64
+# Echo Music for Linux (x86-64)
 
-This is a self-contained Linux x86-64 build of the same C#/Avalonia desktop application source as the Windows edition. It includes the .NET runtime, so a separate .NET installation is not required. It still depends on libraries provided by the Linux desktop environment (X11/Wayland, graphics, fontconfig, and ALSA/PulseAudio/PipeWire audio components).
+This is the self-contained Linux x86-64 package of my native C#/Avalonia desktop music player. It includes the .NET runtime, so you do not need a separate .NET installation. Your Linux desktop still needs its normal graphics, font and audio libraries (for example ALSA, PulseAudio or PipeWire).
 
 ## Install
 
-1. Extract `EchoMusic-Linux-v2.0.0-x64.tar.gz`.
+1. Download and extract `EchoMusic-Linux-v2.0.1-x64.tar.gz`.
 2. Open a terminal in the extracted folder and run:
 
    ```sh
@@ -12,12 +12,16 @@ This is a self-contained Linux x86-64 build of the same C#/Avalonia desktop appl
    ./install.sh
    ```
 
-3. Start **Echo Music** from your desktop application menu, or run `~/.local/opt/echo-music/EchoMusic`.
+3. Launch **Echo Music** from your application menu, or run `~/.local/opt/echo-music/EchoMusic`.
 
-The installer only copies files into your user profile and creates a `.desktop` launcher. It does not require administrator privileges. To remove it, run `~/.local/opt/echo-music/uninstall.sh`.
+The installer works in your user profile and does not need administrator privileges. To remove Echo Music, run:
 
-## Platform notes
+```sh
+~/.local/opt/echo-music/uninstall.sh
+```
 
-The same shared UI, streaming, library, lyrics, DSP, Discord Rich Presence, and playlist code is built for Linux. Windows-only behavior (the Windows installer, native caption buttons, WebView2 Google sign-in, DPAPI-backed secret storage, and Windows media-session integration) is necessarily different or unavailable. Guest Mode remains available on Linux. Linux audio device support depends on the distribution's audio stack and installed native libraries. This x64 build is not for ARM64 Linux.
+## Notes
 
-This package built successfully and the window opened in an Xvfb startup smoke test; audio playback and every distribution/hardware combination have not been tested. No software can be guaranteed free of bugs. Please test playback, device selection, sleep/resume, and Guest Mode on your own distro before sharing it as a release.
+Guest Mode is available on Linux. Windows-only integrations—such as the Windows installer, Windows media-session controls and Google sign-in—are not included in this edition. Audio-device behavior depends on your distribution and desktop audio stack. This package is for x86-64 Linux, not ARM64.
+
+Echo Music is made by **V!SHNU** and is licensed under **GNU GPL-3.0**. See `LICENSE.txt` for the full license.
