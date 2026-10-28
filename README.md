@@ -145,7 +145,15 @@ Echo Music does not ask you to disable antivirus software.
 
 ## Credits & license
 
-Echo Music PC is made by **V!SHNU** and released under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE.txt`](https://github.com/VishnuBele/echo-music-pc/blob/main/LICENSE.txt) for the full license and attribution details.
+Echo Music PC is an independent desktop implementation inspired by the original [Echo Music Android project](https://github.com/EchoMusicApp/Echo-Music) by its original developers.
+
+**Original project:** [Echo Music — GitHub Releases](https://github.com/EchoMusicApp/Echo-Music/releases)
+
+All credit for the original Android application belongs to its respective creators and contributors. Echo Music PC is a separate desktop project and is not an official release of the original Android app.
+
+Echo Music PC is made by **V!SHNU** and released under the **GNU General Public License v3.0 (GPL-3.0)**. See [`LICENSE.txt`](https://github.com/VishnuBele/echo-music-pc/blob/main/LICENSE.txt) for the license and applicable attribution details.
+
+Please refer to the [original project's repository](https://github.com/EchoMusicApp/Echo-Music) for its own license, credits, and notices.
 
 ---
 
