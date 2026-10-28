@@ -1,39 +1,64 @@
-# Echo Music - Native PC Edition (Windows x64 & Linux x64)
+# Echo Music for PC
 
-A **native compiled desktop music player** for Windows and Linux, built with **C# / .NET 8 + Avalonia 11 (Skia GPU) + NAudio + Concentus Opus** — no Electron or Android emulator. WebView2 is used only for optional Google login on Windows. PC edition by V!SHNU; project lineage and license notices are available in About.
+A desktop music player for **Windows 10/11** and **64-bit Linux**, made by **V!SHNU**. Guest Mode is available, and you can use the app without signing in.
 
-## Install & Run on Windows 10 / 11
-1. Download **`EchoMusic-Setup-v2.0.0-x64.exe`**.
-2. Double-click **`EchoMusic-Setup-v2.0.0-x64.exe`** - opens a custom C#/Avalonia setup window, then installs into `%LOCALAPPDATA%\Programs\EchoMusic` without an admin prompt or separate .NET/FFmpeg install. It creates Start Menu and Desktop shortcuts and registers a standard Windows uninstaller.
+## Download and install
 
-## Install & Run on Linux x64
-Download and extract **`EchoMusic-Linux-v2.0.0-x64.tar.gz`**, open a terminal in the extracted folder, then run `chmod +x install.sh && ./install.sh`. This installs a per-user copy under `~/.local/opt/echo-music` and creates an application-menu entry. The archive includes the .NET runtime; your Linux desktop still needs the normal X11/Wayland, graphics, font, and ALSA/PulseAudio/PipeWire system libraries. This package targets x86-64 Linux only. Windows-specific integrations (Windows installer, Windows media-session features, WebView2 Google sign-in, DPAPI storage, and native Windows caption controls) necessarily differ or are unavailable on Linux; Guest Mode remains usable. The two editions are close counterparts rather than byte-for-byte identical behavior.
+Get the installer or Linux package from the [Echo Music releases page](https://github.com/VishnuBele/echo-music-pc/releases).
 
-## Included Echo Music Features
-- **Ad-Free Streaming**: Full InnerTube `WEB_REMIX` catalog + `VISIONOS` / `ANDROID_VR 1.65.10` high-bitrate `itag 251` WebM/Opus progressive streaming.
-- **Pure-C# Opus + Native Windows Audio Engine**: Built-in Matroska/WebM EBML demuxer + RFC-6716 Opus 48 kHz float32 decoder + NAudio `WaveOutEvent` / MediaFoundation for local MP3, FLAC, M4A, WAV, OGG, and OPUS files.
-- **Home, Explore & Echo Brain**: Mood filter chips, a wide Featured Spotlight carousel with a calm rotating fade transition above the shelves, *Echo Brain • Made For You* on-device taste engine, Quick Picks 2-column grid, Global Charts, New Releases, and Moods & Genres.
-- **Music Flow**: Vertical track discovery with eased mouse-wheel surfing, smoothly animated two-line lyrics, and a live 30-bar audio spectrum visualizer and an emphasized animated lyric card.
-- **Multi-Provider Synced Lyrics + AI Translation**: timed/plain lyric attempts across SimpMusic, YouLyPlus, Unison, BetterLyrics, PaxSenix, LRCLIB, KuGou, YouTube Music and transcript fallback; timed matches are preferred, usable untimed text is retained and labeled, and title/artist variations are tried. Matching timed providers are consensus-aligned, including safe long shared offsets, with word timestamps shifted together. When YouTube Music exposes an audio/video counterpart segment map, synced lyrics sourced from the counterpart are retimed to the playing version; track changes hold the timeline and lyric highlight until new audio starts. Click-line seeking also respects each track’s saved manual sync offset. A conservative duration-and-coverage heuristic can infer a long intro for synced lyrics on video tracks, without title-specific timing constants; short excerpts and already-mapped lyrics are left unchanged. Coverage depends on provider availability; no universal coverage is promised. Includes per-song `±0.25s` sync adjustment, Fullscreen Karaoke mode (`F11`), reversible original/translation toggle, offline broad-script Latin transliteration, and instant / custom OpenAI-route translation.
-- **Fullscreen playback scope**: The audited mobile source uses a background video component for animated Canvas artwork; it did not verify full-track music-video playback. This PC build therefore keeps fullscreen artwork/karaoke and does not claim a music-video player.
-- **Music DNA**: Automatic song backstory and artist biography lookup in the right context dock.
-- **10-Band Studio Equalizer & Ambient DSP**: 12 presets, 10 biquad peaking bands (`31 Hz`–`16 kHz`), Sub-Bass Low-Shelf boost, **Slowed + Lush Reverb (`0.85x`)**, **Nightcore (`1.20x`)**, Loudness Normalization, Gapless Preload, and Equal-Power Crossfade (`0–12 s`).
-- **Spotify Public Importer & Universal Sharing**: One URL action auto-routes public `/user/…` profiles, playlists, albums, and tracks; profiles browse publicly listed playlists without signing in. A profile playlist can be played without saving, added individually as a local playlist, or included in Import all. Spotify millisecond durations are retained for playlist totals and rows where exposed (including the tested 14-track `Ufff` playlist at 46:54); CSV/M3U/M3U8 file import remains available. No Spotify OAuth is used. Playlist pages use Spotify-like icon controls, `# / Title / Album` headers, hover-only song menus and pointer-position right-click actions. Local playlists can edit title, description and cover; they use a custom image, a four-track collage, or the selected app icon as fallback. Share tracks through universal `song.link` URLs.
-- **SponsorBlock**: Optional, off by default; choose intro/outro-only or all submitted segment types. Category-specific cache keys, short network timeouts and stale-request guards prevent old results from triggering unexpected skips.
-- **Content filters & reversible exclusions**: Hide video-type songs from Home discovery, Search, Top Result, and radio; exclude individual songs, albums, and artists from discovery through track and media-card menus, including the now-playing bar. Blocked artists/albums/tracks are manageable from Settings and remain reversible; exclusions do not turn videos into playable audio streams. Clicking a filtered result cannot accidentally start a different result.
-- **Appearance & Navigation**: Spotify Green remains default; Rose Petal Light and Rose Petal Bloom are readable light themes, with Bloom’s controls a touch lighter while its accepted background remains unchanged. Settings now has search, a Windows Run on startup option, and matched, animated dropdowns. App icons are grouped with PC choices first (green default, then black/white monochrome), followed by official mobile artwork; the selected icon is also used in the system tray. Sidebar close behavior is Partial (expanded ↔ icons-only, default), Stepwise (expanded → icons-only → hidden), or Hide (expanded ↔ hidden); collapsed playlist covers remain aligned with Liked Songs. Frame-paced wheel scrolling skips horizontal-only nested shelves, wheel-over sliders adjusts only that slider (never seek), and mouse side buttons navigate history. The nonfunctional Dynamic Album Art Ambient Glow option was removed.
-- **Offline Download Manager, Local Music Scanner & Echo Wrapped**: Save tracks for 100% offline playback, scan local Windows Music folders with embedded ID3/FLAC artwork, view *Echo Wrapped* listening analytics, export/restore JSON backups, use the Compact Floating Mini-Player (`Ctrl+M`), Command Palette (`Ctrl+K`), System Tray controls, and global hardware media keys.
+### Windows 10/11
 
-## Version 2.0.0 update
-This first public PC release includes corrected caption-button alignment, a logo-bearing setup executable, and a smaller solid-LZMA installer. The Discord activity preview now appears only when Rich Presence is enabled and always uses Echo’s orange logo rather than track artwork; track metadata/progress remain live and long names are ellipsized. Resource Saver’s title-bar leaf and Settings choice share the same mode state. Play triangles are optically centered within circular controls. A quiet update check runs once at each fresh app launch; it only offers a release page for a newer version and never downloads or installs automatically. Escape dismisses search suggestions or clears an active search without navigating back. Your Library playlist sorting offers Date added, Name, Last updated, and Track count with an ascending/descending toggle. Original-project attribution remains available under a collapsed About disclosure. The app also includes byte-based setup progress, centered fullscreen lyric tools, and player seek-line improvements. Google login does not import YouTube Music history, Recaps, or personalized shelves; this app does not automate private account-library endpoints. The optional cookie-based login is not Google’s official OAuth flow, and session data is DPAPI-protected only at rest on Windows. The account pill remains hidden from the top bar; sign-in is in Settings. The Last.fm/scrobbler feature remains removed.
+1. Download `EchoMusic-Setup-v2.0.0-x64.exe`.
+2. Open the file and follow the on-screen steps. It installs for your Windows user and does not require an administrator password or a separate .NET installation.
 
-## Local data and sign-in
-**Fresh start / clear all Echo Music data:** exit the app completely (if it is in the system tray, choose **Exit** there), press **Win+R**, enter `%LOCALAPPDATA%\EchoMusic`, and delete that folder. Reopen Echo Music; it will create a clean data folder. This removes settings, playlists, history, Google sign-in session, artwork cache, and offline downloads. It does not uninstall the program in `%LOCALAPPDATA%\Programs\EchoMusic` or delete music files in your original folders.
+The installer is unsigned, so Windows may show a security warning. Only continue if you trust the download source. **Do not turn off your antivirus to install it.**
 
-Google login is optional and uses the same Google account for YouTube and YouTube Music. In this build it verifies/displays the YouTube Music profile and attempts to sync likes for streamed tracks; local files and Echo Music playlists stay local. It does not import your full YouTube Music library, history, Recaps or personalized Home. The current login captures a YouTube Music web session rather than using Google's official YouTube Data API OAuth flow, so this build does not claim that all account operations are officially supported or risk-free. Saved session cookies are protected with Windows DPAPI for your Windows user, but the active token exists in memory while the app is running. You may switch to Guest Mode or revoke sessions in Google Account security settings. Transcript lookup can use the signed-in path only when YouTube exposes captions; there is no guarantee of lyrics and no bypass of restrictions. Guest Mode remains available.
+### Linux (64-bit)
 
-## Antivirus and code signing
-The app does not disable antivirus, conceal its startup entry, or install a background service. The startup option creates a normal per-user shortcut that can be inspected or removed in the Windows Startup folder. This project cannot guarantee that Quick Heal, Microsoft Defender, or another antivirus vendor will classify a build as clean. The setup is unsigned unless a trusted Authenticode certificate is supplied during packaging. To sign, set `SIGN_CERT_FILE` (and optionally `SIGN_CERT_PASSWORD`, `SIGNTOOL_BIN`, and `SIGN_TIMESTAMP_URL`) before running `installer/build-windows-setup.sh`; the script signs the published executable and installer. If an antivirus product quarantines a build, verify its source and publisher first, then submit the exact file to that vendor for review rather than disabling protection or restoring it blindly.
+1. Download and extract `EchoMusic-Linux-v2.0.0-x64.tar.gz`.
+2. Open a terminal in the extracted folder and run:
 
-## License
-Released under **GNU GPL v3.0** (`LICENSE.txt`), matching upstream `EchoMusicApp/Echo-Music`. The eased lyric-line motion is informed by the Better Lyrics project (GPL-3.0, https://github.com/better-lyrics/better-lyrics); this build uses its own native Avalonia presentation and timing-map implementation rather than copying its extension source.
+   ```sh
+   chmod +x install.sh
+   ./install.sh
+   ```
+
+The installer creates a per-user copy and an application-menu shortcut. The package includes what Echo Music needs to run, but your Linux desktop may need additional system audio or graphics components. Linux support is for x86-64 systems; sound and desktop compatibility can vary.
+
+## What you can do
+
+- **Discover and play music:** browse recommendations, charts, new releases, moods and genres; search for music; and explore related tracks.
+- **Enjoy lyrics:** view synced lyrics, adjust their timing, translate them, or use fullscreen Karaoke mode with **F11**. Lyrics availability varies by song.
+- **Manage playlists and your music:** make playlists, scan your local music, import public Spotify playlists, and save tracks for offline listening. Spotify sign-in is not required for public playlist imports.
+- **Make playback your own:** use the 10-band equalizer, presets, playback effects, volume normalization and crossfade.
+- **Personalize the app:** choose a theme, filter content, and manage excluded songs, albums or artists in Settings.
+- **Use handy extras:** open the mini-player with **Ctrl+M**, the Command Palette with **Ctrl+K**, view your Echo Wrapped listening summary, and back up or restore app data.
+- **Share and connect:** share tracks with universal links, or enable Discord Rich Presence if you want friends to see what you’re listening to.
+
+## Sign-in and privacy
+
+Sign-in is optional; Guest Mode remains usable. On Windows, optional Google sign-in offers limited YouTube Music features. It is **not Google’s official sign-in integration** and does not import your full music library, listening history, Recaps or personalized Home feed. Linux does not include Google sign-in.
+
+On Windows, saved sign-in data is protected for your Windows user, but that protection does not make an active session immune to malware. Use Guest Mode if you prefer not to sign in, and review or revoke sessions in your Google Account security settings when needed.
+
+## Platform differences
+
+Some features rely on Windows and are not available on Linux, including the Windows installer, Windows media controls and Google sign-in. Linux uses Guest Mode. The editions offer similar core music-player features, but they are not identical. The Linux package has had a build and startup check; it has not been tested on every distribution or audio setup. The Windows installer has not been runtime-tested on every Windows configuration.
+
+## Reset Echo Music on Windows
+
+To clear Echo Music’s saved settings and data:
+
+1. Exit the app completely, including from the system tray if it is running there.
+2. Press **Win+R**, enter `%LOCALAPPDATA%\EchoMusic`, and press Enter.
+3. Delete the `EchoMusic` folder, then reopen the app.
+
+This clears app settings, playlists, listening history, saved sign-in, downloads and cached artwork. It does **not** uninstall Echo Music or delete music files in your original folders.
+
+## Version 2.0.0
+
+The first public PC release includes Windows and Linux x64 packages, an updated installer, improved player controls and layout, playlist sorting, and a quieter update check. The update check only links to a newer release; it does not download or install updates automatically.
+
+## Credits and license
+
+Echo Music PC is by **V!SHNU** and is released under **GNU GPL v3.0**. Project lineage and license notices are available in the app’s **About** section and in `LICENSE.txt`.
