@@ -28,6 +28,8 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
     private double _durationSec;
     private int _sourceChannels = 2;
     private int _preSkipSamples;
+    private double? _seekTargetSec;
+    private int _seekSkipSamplesPerChannel;
 
     private long _currentClusterTimeUnits;
     private long _clusterEndPos = long.MaxValue;
@@ -214,6 +216,8 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
             _pcmReadIdx = 0;
             _pcmCount = 0;
             _eof = false;
+            _seekTargetSec = targetSeconds;
+            _seekSkipSamplesPerChannel = 0;
             _decoder.ResetState();
 
             if (_cuePoints.Count > 0)
@@ -360,7 +364,20 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
 
         long ptsUnits = _currentClusterTimeUnits + relTime;
         if (ptsUnits >= 0)
-            _currentPositionSec = ptsUnits * _timestampScaleNs / 1_000_000_000.0;
+        {
+            double blockStartSec = ptsUnits * _timestampScaleNs / 1_000_000_000.0;
+            _currentPositionSec = blockStartSec;
+            if (_seekTargetSec is double targetSec)
+            {
+                if (blockStartSec < targetSec)
+                    _seekSkipSamplesPerChannel = (int)Math.Clamp(Math.Ceiling((targetSec - blockStartSec) * OutputSampleRate), 0, int.MaxValue);
+                else
+                {
+                    _seekSkipSamplesPerChannel = 0;
+                    _seekTargetSec = null;
+                }
+            }
+        }
 
         int lacing = (flags >> 1) & 0x03;
         if (lacing == 0)
@@ -441,7 +458,16 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
                 if (skipPerCh >= samplesPerCh) return;
             }
 
+            if (_seekTargetSec is not null && _seekSkipSamplesPerChannel > 0)
+            {
+                int seekSkip = Math.Min(_seekSkipSamplesPerChannel, samplesPerCh - skipPerCh);
+                skipPerCh += seekSkip;
+                _seekSkipSamplesPerChannel -= seekSkip;
+                if (_seekSkipSamplesPerChannel == 0) _seekTargetSec = null;
+            }
+
             int validPerCh = samplesPerCh - skipPerCh;
+            if (validPerCh <= 0) return;
             int outFloats = validPerCh * OutputChannels;
             EnsureRingCapacity(outFloats);
 

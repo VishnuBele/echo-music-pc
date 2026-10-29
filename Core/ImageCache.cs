@@ -10,9 +10,46 @@ namespace EchoMusic.Core;
 
 public static class ImageCache
 {
-    private static readonly ConcurrentDictionary<string, Bitmap> MemCache = new(StringComparer.Ordinal);
+    private static readonly object MemLock = new();
+    private static readonly Dictionary<string, (Bitmap Image, LinkedListNode<string> Node)> MemCache = new(StringComparer.Ordinal);
+    private static readonly LinkedList<string> MemLru = new();
+    private static readonly SemaphoreSlim NetworkImageSlots = new(4, 4);
+    private static readonly SemaphoreSlim SaverImageSlots = new(2, 2);
     private static readonly ConcurrentDictionary<string, Lazy<Task<Bitmap?>>> Inflight = new(StringComparer.Ordinal);
     private static readonly Regex VideoThumbRegex = new(@"/vi/([A-Za-z0-9_-]{11})/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static int _memCapacity = 72;
+    private static volatile bool _resourceSaver;
+
+    public static void SetResourceSaver(bool enabled)
+    {
+        _resourceSaver = enabled;
+        ResourceSaverState.IsActive = enabled;
+        lock (MemLock)
+        {
+            _memCapacity = enabled ? 12 : 72;
+            TrimMemoryCache();
+        }
+    }
+
+    private static Bitmap? TryGetMemory(string key)
+    {
+        lock (MemLock)
+        {
+            if (!MemCache.TryGetValue(key, out var item)) return null;
+            MemLru.Remove(item.Node);
+            MemLru.AddFirst(item.Node);
+            return item.Image;
+        }
+    }
+
+    private static void TrimMemoryCache()
+    {
+        while (MemCache.Count > _memCapacity && MemLru.Last is { } last)
+        {
+            MemCache.Remove(last.Value);
+            MemLru.RemoveLast();
+        }
+    }
 
     public static async Task<Bitmap?> LoadAsync(string? urlOrPath, HttpClient http, string cacheDir)
     {
@@ -40,7 +77,8 @@ public static class ImageCache
 
     private static async Task<Bitmap?> LoadOneAsync(string key, HttpClient http, string cacheDir)
     {
-        if (MemCache.TryGetValue(key, out var mem)) return mem;
+        var mem = TryGetMemory(key);
+        if (mem is not null) return mem;
         var lazy = Inflight.GetOrAdd(key, k => new Lazy<Task<Bitmap?>>(
             () => LoadCoreAsync(k, http, cacheDir), LazyThreadSafetyMode.ExecutionAndPublication));
         try { return await lazy.Value.ConfigureAwait(false); }
@@ -58,7 +96,7 @@ public static class ImageCache
             try
             {
                 using var ms = new MemoryStream(bytes, writable: false);
-                return Bitmap.DecodeToWidth(ms, 640);
+                return Bitmap.DecodeToWidth(ms, _resourceSaver ? 384 : 640);
             }
             catch { return null; }
         }
@@ -96,11 +134,29 @@ public static class ImageCache
             req.Headers.TryAddWithoutValidation("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
             req.Headers.TryAddWithoutValidation("Referer", YouTubeClients.Referer);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-            using var response = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode || (response.Content.Headers.ContentLength is long len && (len <= 0 || len > 20_000_000)))
-                return null;
-            var bytes = await response.Content.ReadAsByteArrayAsync(timeout.Token).ConfigureAwait(false);
-            if (bytes.Length < 128 || bytes.Length > 20_000_000) return null;
+            byte[] bytes;
+            bool saverRequest = _resourceSaver;
+            await NetworkImageSlots.WaitAsync(timeout.Token).ConfigureAwait(false);
+            bool saverSlotTaken = false;
+            try
+            {
+                if (saverRequest)
+                {
+                    await SaverImageSlots.WaitAsync(timeout.Token).ConfigureAwait(false);
+                    saverSlotTaken = true;
+                }
+                using var response = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+                long maxBytes = saverRequest ? 8_000_000 : 20_000_000;
+                if (!response.IsSuccessStatusCode || (response.Content.Headers.ContentLength is long len && (len <= 0 || len > maxBytes)))
+                    return null;
+                bytes = await response.Content.ReadAsByteArrayAsync(timeout.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (saverSlotTaken) SaverImageSlots.Release();
+                NetworkImageSlots.Release();
+            }
+            if (bytes.Length < 128 || bytes.Length > (saverRequest ? 8_000_000 : 20_000_000)) return null;
             var bmp = TryDecode(bytes);
             if (bmp is null) return null;
             try
@@ -118,13 +174,19 @@ public static class ImageCache
 
     private static Bitmap AddToMemory(string key, Bitmap bmp)
     {
-        if (MemCache.Count > 220)
+        lock (MemLock)
         {
-            foreach (var old in MemCache.Keys.Take(80))
-                MemCache.TryRemove(old, out _);
+            if (MemCache.TryGetValue(key, out var existing))
+            {
+                MemLru.Remove(existing.Node);
+                MemLru.AddFirst(existing.Node);
+                return existing.Image;
+            }
+            var node = MemLru.AddFirst(key);
+            MemCache[key] = (bmp, node);
+            TrimMemoryCache();
+            return bmp;
         }
-        MemCache[key] = bmp;
-        return bmp;
     }
 
     /// <summary>

@@ -29,6 +29,8 @@ public partial class MainWindow : Window
     internal readonly MusicDnaAndExtras _extras;
 
     private readonly DispatcherTimer _uiTimer;
+    private readonly DispatcherTimer _visualMotionTimer;
+    private DispatcherTimer? _searchSuggestFadeTimer;
     private readonly float[] _fftScratch = new float[32];
     private SpectrumVisualizerControl? _dockCurrentArtSpectrum;
     private Border? _dockCurrentArtSpectrumPlate;
@@ -44,6 +46,7 @@ public partial class MainWindow : Window
     private int _navCursor = -1;
     private bool _suppressNavPush;
     private string _activeNavKey = "home";
+    private string _currentLibraryTab = "overview";
 
     // Right panel state ("now" | "queue" | "lyrics" | "dna")
     private string _dockTab = "now";
@@ -51,6 +54,7 @@ public partial class MainWindow : Window
     private bool _leftSidebarOpen = true;
     private string _leftSidebarMode = "Expanded";
     private readonly Dictionary<TextBlock, bool> _sidebarTextOriginalVisibility = new();
+    private string? _sidebarPlaylistFingerprint;
     private DispatcherTimer? _leftSidebarAnimation;
     private bool _sidebarCompactAnimationPending;
     private bool _sidebarContentOffsetAnimating;
@@ -58,8 +62,19 @@ public partial class MainWindow : Window
     private double _sidebarContentOffsetFrom;
     private double _sidebarContentOffsetTo;
     private DispatcherTimer? _rightSidebarAnimation;
-    private readonly Dictionary<ScrollViewer, DispatcherTimer> _smoothScrollTimers = new();
-    private readonly Dictionary<ScrollViewer, Vector> _smoothScrollTargets = new();
+    private sealed class SmoothScrollState
+    {
+        public double TargetX;
+        public double TargetY;
+        public double VelocityX;
+        public double VelocityY;
+    }
+    private readonly Dictionary<ScrollViewer, SmoothScrollState> _smoothScrollStates = new();
+    private bool _animationFramePending;
+    private bool _hasLastMotionFrame;
+    private TimeSpan _lastMotionFrameTime;
+    private TimeSpan _lastMotionUpdateTime;
+    private ContextMenu? _openTrackContextMenu;
     private sealed class ImageShimmerState
     {
         public required Border Frame { get; init; }
@@ -72,6 +87,10 @@ public partial class MainWindow : Window
     private readonly Dictionary<Image, ImageShimmerState> _imageShimmers = new();
     private DispatcherTimer? _imageShimmerTimer;
     private ScrollViewer? _dockLyricsScroller;
+    private StackPanel? _historyTrackListStack;
+    private readonly Dictionary<string, Control> _historyTrackRows = new(StringComparer.Ordinal);
+    private StackPanel? _dockNowStack;
+    private bool _dockDnaCardAdded;
 
     // Search debounce
     private CancellationTokenSource? _suggestCts;
@@ -148,6 +167,13 @@ public partial class MainWindow : Window
         _extras = new MusicDnaAndExtras(_yt);
 
         InitializeComponent();
+        ImageCache.SetResourceSaver(IsResourceSaverActive);
+        ScrollingTitleTextBlock.AnimationRequested += EnsureAnimationFramePump;
+        SearchSuggestFlyout.PlacementTarget = GlobalSearchBox;
+        SearchSuggestFlyout.HorizontalOffset = 0;
+        SearchSuggestFlyout.VerticalOffset = 4;
+        _visualMotionTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnVisualMotionTick);
+        _visualMotionTimer.Interval = AnimationFrameInterval;
         ToastBanner.RenderTransform = _toastTransform;
         CenterViewHost.SizeChanged += (_, _) => UpdateMusicFlowLyricWidth();
 
@@ -171,10 +197,24 @@ public partial class MainWindow : Window
                 UpdateWindowActivityState();
         };
 
-        Activated += (_, _) => UpdateWindowActivityState();
+        Activated += (_, _) =>
+        {
+            UpdateWindowActivityState();
+            // Tray restoration reuses this Window instead of raising Opened again. Re-apply the
+            // persisted sidebar mode after the visual tree is active so playlist labels cannot leak
+            // into the compact layout on show/restore.
+            if (_leftSidebarAnimation is null)
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (IsVisible && _leftSidebarAnimation is null)
+                        ApplyLeftSidebarMode(_leftSidebarMode, animate: false, rerenderSettings: false);
+                }, DispatcherPriority.Loaded);
+            }
+        };
         Deactivated += (_, _) => UpdateWindowActivityState();
 
-        _uiTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(50), DispatcherPriority.Render, OnUiFrameTick);
+        _uiTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Render, OnUiFrameTick);
         _uiTimer.Start();
 
         Opened += OnWindowOpened;
@@ -296,6 +336,13 @@ public partial class MainWindow : Window
         }
 
         RefreshSidebarBadgesAndPlaylists();
+        ApplyLeftSidebarMode(_leftSidebarMode, animate: false, rerenderSettings: false);
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!IsVisible || _leftSidebarAnimation is not null) return;
+            _leftSidebarMode = NormalizeSidebarMode(_store.Settings.LeftSidebarMode);
+            ApplyLeftSidebarMode(_leftSidebarMode, animate: false, rerenderSettings: false);
+        }, DispatcherPriority.Background);
         RefreshAccountBadge();
         RenderRightDock();
         UpdateNowPlayingUi();
@@ -391,10 +438,33 @@ public partial class MainWindow : Window
     private bool IsResourceSaverActive => ResourceSaverPolicy == "On"
         || (ResourceSaverPolicy == "Auto" && (!IsActive || !IsVisible || WindowState == WindowState.Minimized));
 
+    private string CurrentPerformanceMode => _store.Settings.PerformanceMode is "Low" or "Auto" or "High"
+        ? _store.Settings.PerformanceMode
+        : _store.Settings.AnimationFrameRate <= 30 ? "Low"
+        : _store.Settings.AnimationFrameRate >= 90 ? "High" : "Auto";
+
+    // These are update caps, not promised monitor refresh rates. High uses each compositor animation tick.
+    private int ConfiguredAnimationRate => CurrentPerformanceMode switch { "Low" => 30, "High" => 120, _ => 60 };
+
+    private TimeSpan AnimationFrameInterval => TimeSpan.FromSeconds(1.0 / (IsResourceSaverActive ? 30 : ConfiguredAnimationRate));
+
+    private TimeSpan DesiredUiInterval => (!IsVisible || WindowState == WindowState.Minimized)
+        ? TimeSpan.FromMilliseconds(500)
+        : (_audio.IsPlaying || _audio.IsLoading || _streamBuffering)
+            ? AnimationFrameInterval
+            : IsResourceSaverActive
+                ? TimeSpan.FromMilliseconds(500)
+                : TimeSpan.FromMilliseconds(250);
+
     private void UpdateWindowActivityState()
     {
         bool unavailable = !IsVisible || WindowState == WindowState.Minimized;
-        var animationInterval = IsResourceSaverActive ? TimeSpan.FromMilliseconds(33) : TimeSpan.FromMilliseconds(16);
+        ImageCache.SetResourceSaver(IsResourceSaverActive);
+        ScrollingTitleTextBlock.SetPerformanceMode(CurrentPerformanceMode, IsResourceSaverActive);
+        var animationInterval = AnimationFrameInterval;
+        _visualMotionTimer.Interval = animationInterval;
+        if (IsResourceSaverActive)
+            foreach (var image in _imageShimmers.Keys.ToArray()) StopImageLoadingShimmer(image);
         foreach (var timer in _lyricsShimmerTimers)
         {
             timer.Interval = animationInterval;
@@ -412,17 +482,51 @@ public partial class MainWindow : Window
 
         if (unavailable)
         {
-            _uiTimer.Stop();
+            // Keep low-rate audio maintenance alive in the tray (sleep timers, history, crossfade/next-track),
+            // while stopping all UI animation and high-frequency render work.
+            _uiTimer.Interval = DesiredUiInterval;
+            _uiTimer.Start();
+            _visualMotionTimer.Stop();
+            _heroAutoTimer?.Stop();
+            _smoothScrollStates.Clear();
+            _hasLastMotionFrame = false;
+            if (_leftSidebarAnimation is not null)
+            {
+                _leftSidebarAnimation.Stop();
+                _leftSidebarAnimation = null;
+                _sidebarCompactAnimationPending = false;
+                _sidebarContentOffsetAnimating = false;
+                _sidebarContentOffsetProgress = _sidebarContentOffsetTo;
+                WorkspaceColumnsGrid.ColumnDefinitions[0].Width = new GridLength(_leftSidebarMode switch { "Compact" => 76, "Hidden" => 0, _ => 244 });
+                UpdateSidebarCompactVisuals();
+            }
+            if (_rightSidebarAnimation is not null)
+            {
+                _rightSidebarAnimation.Stop();
+                _rightSidebarAnimation = null;
+                WorkspaceColumnsGrid.ColumnDefinitions[2].Width = new GridLength(_dockOpen ? 312 : 0);
+                if (!_dockOpen) RightDockBorder.IsVisible = false;
+            }
         }
         else
         {
-            _uiTimer.Interval = IsResourceSaverActive
-                ? TimeSpan.FromMilliseconds(150)
-                : TimeSpan.FromMilliseconds(50);
+            _uiTimer.Interval = DesiredUiInterval;
             _uiTimer.Start();
+            if (IsResourceSaverActive) _heroAutoTimer?.Stop();
+            else if (_activeNavKey == "home") _heroAutoTimer?.Start();
         }
         _spotifyPlaceholderSync?.Invoke();
         UpdateResourceSaverButtonVisual();
+    }
+
+    private void SetPerformanceMode(string mode)
+    {
+        if (mode is not ("Low" or "Auto" or "High")) mode = "Auto";
+        _store.Settings.PerformanceMode = mode;
+        _store.Settings.AnimationFrameRate = mode switch { "Low" => 30, "High" => 120, _ => 60 };
+        _store.SaveDebounced();
+        UpdateWindowActivityState();
+        if (_activeNavKey == "settings") RenderSettingsView();
     }
 
     private void CycleResourceSaverPolicy()
@@ -479,11 +583,11 @@ public partial class MainWindow : Window
             return;
         }
         _uiTimer.Stop();
+        _visualMotionTimer.Stop();
         _leftSidebarAnimation?.Stop();
         _rightSidebarAnimation?.Stop();
-        foreach (var scrollTimer in _smoothScrollTimers.Values) scrollTimer.Stop();
-        _smoothScrollTimers.Clear();
-        _smoothScrollTargets.Clear();
+        _smoothScrollStates.Clear();
+        ScrollingTitleTextBlock.AnimationRequested -= EnsureAnimationFramePump;
         foreach (var image in _imageShimmers.Keys.ToArray()) StopImageLoadingShimmer(image);
         foreach (var timer in _lyricsShimmerTimers) timer.Stop();
         _lyricsShimmerTimers.Clear();
@@ -526,22 +630,32 @@ public partial class MainWindow : Window
         // Crisp Spotify-style solid white circle play button on dark themes, dark charcoal on light themes
         var btnFill = pal.IsDark ? Color.Parse("#FFFFFF") : Color.Parse("#181818");
         var btnGlyph = pal.IsDark ? Color.Parse("#000000") : Color.Parse("#FFFFFF");
-        const bool useScallop = false;
+        bool useWavy = _store.Settings.WavyPlayPauseButton;
+        bool useScallop = !useWavy && string.Equals(_store.Settings.PlayerStyle, "Scallop", StringComparison.OrdinalIgnoreCase);
 
         PlayPauseScallop.FillColor = btnFill;
         PlayPauseScallop.GlyphColor = btnGlyph;
         PlayPauseScallop.UseScallopShape = useScallop;
+        PlayPauseScallop.UseWavyShape = useWavy;
         PlayPauseScallop.InvalidateVisual();
 
         FsScallop.FillColor = pal.IsDark ? Color.Parse("#FFFFFF") : Color.Parse("#181818");
         FsScallop.GlyphColor = pal.IsDark ? Color.Parse("#000000") : Color.Parse("#FFFFFF");
         FsScallop.UseScallopShape = useScallop;
+        FsScallop.UseWavyShape = useWavy;
         FsScallop.InvalidateVisual();
 
         MiniScallop.FillColor = btnFill;
         MiniScallop.GlyphColor = btnGlyph;
         MiniScallop.UseScallopShape = useScallop;
+        MiniScallop.UseWavyShape = useWavy;
         MiniScallop.InvalidateVisual();
+
+        string seekStyle = _store.Settings.PlayerSliderStyle;
+        SeekSlider.SliderStyle = seekStyle;
+        FsSeekSlider.SliderStyle = seekStyle;
+        MiniSeekSlider.SliderStyle = seekStyle;
+        EnsureVisualMotionTimerRunning();
 
         SkipBack10Btn.IsVisible = _store.Settings.ShowTenSecSkip;
         SkipFwd10Btn.IsVisible = _store.Settings.ShowTenSecSkip;
@@ -674,7 +788,7 @@ public partial class MainWindow : Window
         {
             GlobalSearchBox.Text = "";
             ClearSearchBtn.IsVisible = false;
-            SearchSuggestPopup.IsVisible = false;
+            SetSearchSuggestionsVisible(false);
             if (_activeNavKey == "search") await GoBackAsync();
             BackNavBtn.Focus();
         };
@@ -691,13 +805,13 @@ public partial class MainWindow : Window
                 var q = SearchSuggestPopup.IsVisible && _searchSuggestionIndex >= 0 && _searchSuggestionIndex < _searchSuggestionTexts.Count
                     ? _searchSuggestionTexts[_searchSuggestionIndex]
                     : GlobalSearchBox.Text?.Trim() ?? "";
-                SearchSuggestPopup.IsVisible = false;
+                SetSearchSuggestionsVisible(false);
                 if (!string.IsNullOrEmpty(q)) await CommitSearchAsync(q);
                 e.Handled = true;
             }
             else if (e.Key == Key.Escape)
             {
-                SearchSuggestPopup.IsVisible = false;
+                SetSearchSuggestionsVisible(false);
                 _searchSuggestionIndex = -1;
                 e.Handled = true;
             }
@@ -705,7 +819,7 @@ public partial class MainWindow : Window
         GlobalSearchBox.LostFocus += async (_, _) =>
         {
             await Task.Delay(120);
-            SearchSuggestPopup.IsVisible = false;
+            SetSearchSuggestionsVisible(false);
             _searchSuggestionIndex = -1;
         };
         PointerPressed += (_, e) =>
@@ -718,7 +832,7 @@ public partial class MainWindow : Window
                 if (ReferenceEquals(source, GlobalSearchBox) || ReferenceEquals(source, SearchSuggestPopup)) { withinSearch = true; break; }
                 source = source.Parent as Control;
             }
-            if (!withinSearch) { SearchSuggestPopup.IsVisible = false; _searchSuggestionIndex = -1; }
+            if (!withinSearch) { SetSearchSuggestionsVisible(false); _searchSuggestionIndex = -1; }
         };
 
         // Right panel tabs follow the Spotify layout. Lyrics stay on the player-bar button.
@@ -763,7 +877,7 @@ public partial class MainWindow : Window
         NowMoreBtn.Click += (_, ev) =>
         {
             ev.Handled = true;
-            if (_audio.CurrentTrack is { } playing) BuildTrackContextMenu(playing).Open(NowMoreBtn);
+            if (_audio.CurrentTrack is { } playing) OpenTrackContextMenu(playing, null, NowMoreBtn, PlacementMode.Bottom);
         };
 
         NowLikeBtn.Click += (_, _) =>
@@ -815,27 +929,31 @@ public partial class MainWindow : Window
 
         // Seek & Volume sliders (throttled so dragging never thrashes the Opus decoder)
         DateTime lastUserSeekUtc = DateTime.MinValue;
-        void HandleUserSliderSeek(double pctVal)
+        void HandleUserSliderSeek(double pctVal, bool force = false)
         {
             if (_seekingByCode || _audio.DurationSeconds <= 1) return;
             var now = DateTime.UtcNow;
-            if ((now - lastUserSeekUtc).TotalMilliseconds < 160) return;
+            if (!force && (now - lastUserSeekUtc).TotalMilliseconds < 160) return;
             lastUserSeekUtc = now;
             _audio.Seek(pctVal / 100.0 * _audio.DurationSeconds);
+            if (force) RefreshLyricsAfterSeek();
         }
 
         SeekSlider.PropertyChanged += (_, e) =>
         {
             if (e.Property == SeekProgressControl.ValueProperty) HandleUserSliderSeek(SeekSlider.Value);
         };
+        SeekSlider.SeekCommitted += (_, _) => HandleUserSliderSeek(SeekSlider.Value, force: true);
         FsSeekSlider.PropertyChanged += (_, e) =>
         {
             if (e.Property == SeekProgressControl.ValueProperty) HandleUserSliderSeek(FsSeekSlider.Value);
         };
+        FsSeekSlider.SeekCommitted += (_, _) => HandleUserSliderSeek(FsSeekSlider.Value, force: true);
         MiniSeekSlider.PropertyChanged += (_, e) =>
         {
             if (e.Property == SeekProgressControl.ValueProperty) HandleUserSliderSeek(MiniSeekSlider.Value);
         };
+        MiniSeekSlider.SeekCommitted += (_, _) => HandleUserSliderSeek(MiniSeekSlider.Value, force: true);
 
         VolumeSlider.PropertyChanged += (_, e) =>
         {
@@ -852,6 +970,8 @@ public partial class MainWindow : Window
         {
             RefreshSidebarBadgesAndPlaylists();
             UpdateNowPlayingUi();
+            if (_activeNavKey == "library" && _currentLibraryTab == "history")
+                UpdateHistoryTrackRowsInPlace();
         });
         _store.DownloadsChanged += () => Dispatcher.UIThread.Post(() =>
         {
@@ -871,7 +991,7 @@ public partial class MainWindow : Window
             if (FullscreenOverlay.IsVisible) { ToggleFullscreenOverlay(false); e.Handled = true; return; }
             if (SearchSuggestPopup.IsVisible)
             {
-                SearchSuggestPopup.IsVisible = false;
+                SetSearchSuggestionsVisible(false);
                 _searchSuggestionIndex = -1;
                 e.Handled = true;
                 return;
@@ -880,7 +1000,7 @@ public partial class MainWindow : Window
             {
                 GlobalSearchBox.Text = "";
                 ClearSearchBtn.IsVisible = false;
-                SearchSuggestPopup.IsVisible = false;
+                SetSearchSuggestionsVisible(false);
                 _searchSuggestionIndex = -1;
                 e.Handled = true;
                 return;
@@ -952,15 +1072,44 @@ public partial class MainWindow : Window
         }
     }
 
-    // --------------------------------------------------------- 20Hz Smooth UI Tick
+    private void EnsureVisualMotionTimerRunning()
+    {
+        _visualMotionTimer.Interval = AnimationFrameInterval;
+        if (IsVisible && !_visualMotionTimer.IsEnabled)
+            _visualMotionTimer.Start();
+    }
+
+    private void OnVisualMotionTick(object? sender, EventArgs e)
+    {
+        if (!IsVisible || WindowState == WindowState.Minimized)
+        {
+            _visualMotionTimer.Stop();
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        bool active = PlayPauseScallop.AdvanceAnimation(now)
+            | FsScallop.AdvanceAnimation(now)
+            | MiniScallop.AdvanceAnimation(now);
+        bool animatedSlider = (_store.Settings.PlayerSliderStyle is "Wavy" or "Squiggly")
+            && (_audio.IsPlaying || _audio.IsLoading || _streamBuffering);
+        if (animatedSlider || _audio.IsLoading || _streamBuffering)
+        {
+            SeekSlider.InvalidateVisual();
+            FsSeekSlider.InvalidateVisual();
+            MiniSeekSlider.InvalidateVisual();
+            active = true;
+        }
+        if (!active) _visualMotionTimer.Stop();
+    }
+
+    // --------------------------------------------------------- Adaptive playback and UI-maintenance tick
 
     private void OnUiFrameTick(object? sender, EventArgs e)
     {
         _audio.TickMaintenance();
         if (!IsVisible || WindowState == WindowState.Minimized) return;
-        var desiredInterval = IsResourceSaverActive
-            ? TimeSpan.FromMilliseconds(150)
-            : TimeSpan.FromMilliseconds(50);
+        var desiredInterval = DesiredUiInterval;
         if (_uiTimer.Interval != desiredInterval) _uiTimer.Interval = desiredInterval;
 
         bool loadingTrack = _audio.IsLoading;
@@ -971,6 +1120,14 @@ public partial class MainWindow : Window
         if (loadingTrack || !_audio.IsPlaying || _audio.CurrentTrack is not { IsLocal: false } || playingId != _bufferMonitorTrackId)
         {
             _bufferMonitorTrackId = playingId;
+            _bufferMonitorPosition = pos;
+            _bufferMonitorAdvancedUtc = tickUtc;
+            _streamBuffering = false;
+        }
+        else if (pos < _bufferMonitorPosition - 0.35)
+        {
+            // A backward seek is a timeline discontinuity, not a network stall. Reset the
+            // baseline so the old, larger timestamp cannot keep the spinner alive until caught up.
             _bufferMonitorPosition = pos;
             _bufferMonitorAdvancedUtc = tickUtc;
             _streamBuffering = false;
@@ -996,14 +1153,16 @@ public partial class MainWindow : Window
         FsSeekSlider.Value = pct;
         MiniSeekSlider.Value = pct;
         _seekingByCode = false;
+        SeekSlider.IsPlaying = FsSeekSlider.IsPlaying = MiniSeekSlider.IsPlaying = _audio.IsPlaying;
+        PlayPauseScallop.IsPlaying = FsScallop.IsPlaying = MiniScallop.IsPlaying = _audio.IsPlaying;
+        PlayPauseScallop.IsLoading = FsScallop.IsLoading = MiniScallop.IsLoading = loadingTrack;
 
         bool showStreamLoading = loadingTrack || _streamBuffering;
-        SeekLoadingBar.IsVisible = showStreamLoading;
-        FsSeekLoadingBar.IsVisible = showStreamLoading;
-        MiniSeekLoadingBar.IsVisible = showStreamLoading;
-        ToolTip.SetTip(SeekLoadingBar, _streamBuffering ? "Waiting for stream data" : "Loading track");
-        ToolTip.SetTip(FsSeekLoadingBar, _streamBuffering ? "Waiting for stream data" : "Loading track");
-        ToolTip.SetTip(MiniSeekLoadingBar, _streamBuffering ? "Waiting for stream data" : "Loading track");
+        SeekSlider.IsBuffering = FsSeekSlider.IsBuffering = MiniSeekSlider.IsBuffering = showStreamLoading;
+        if (showStreamLoading || _audio.IsPlaying) EnsureVisualMotionTimerRunning();
+        ToolTip.SetTip(SeekSlider, _streamBuffering ? "Waiting for stream data" : (loadingTrack ? "Loading track" : "Seek"));
+        ToolTip.SetTip(FsSeekSlider, _streamBuffering ? "Waiting for stream data" : (loadingTrack ? "Loading track" : "Seek"));
+        ToolTip.SetTip(MiniSeekSlider, _streamBuffering ? "Waiting for stream data" : (loadingTrack ? "Loading track" : "Seek"));
         SeekSlider.IsEnabled = !loadingTrack;
         FsSeekSlider.IsEnabled = !loadingTrack;
         MiniSeekSlider.IsEnabled = !loadingTrack;
@@ -1023,20 +1182,27 @@ public partial class MainWindow : Window
             SleepTimerTopLabel.IsVisible = false;
         }
 
-        _audio.CopySpectrum32(_fftScratch);
-        MiniBarSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
-        _flowSpectrum?.UpdateBands(_fftScratch, _audio.IsPlaying);
-        if (_dockOpen && _dockTab == "now" && _dockCurrentArtSpectrum is not null)
+        bool spectrumNeedsDecay = !MiniBarSpectrum.IsSettled
+            || (_flowSpectrum is { IsVisible: true, IsSettled: false })
+            || (_dockOpen && _dockTab == "now" && _dockCurrentArtSpectrum is { IsVisible: true, IsSettled: false })
+            || (FullscreenOverlay.IsVisible && (!FsSpectrum.IsSettled || !FsArtSpectrum.IsSettled));
+        if (_audio.IsPlaying || spectrumNeedsDecay)
         {
-            _dockCurrentArtSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
-            if (_dockCurrentArtSpectrumPlate is not null)
-                _dockCurrentArtSpectrumPlate.IsVisible = _audio.IsPlaying;
-        }
-        if (FullscreenOverlay.IsVisible)
-        {
-            FsSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
-            FsArtSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
-            if (_audio.CurrentTrack is not null) FsArtSpectrumPlate.IsVisible = _audio.IsPlaying;
+            _audio.CopySpectrum32(_fftScratch);
+            if (MiniBarSpectrum.IsVisible) MiniBarSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
+            if (_flowSpectrum is { IsVisible: true } flowSpectrum) flowSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
+            if (_dockOpen && _dockTab == "now" && _dockCurrentArtSpectrum is { IsVisible: true } dockSpectrum)
+            {
+                dockSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
+                if (_dockCurrentArtSpectrumPlate is not null)
+                    _dockCurrentArtSpectrumPlate.IsVisible = _audio.IsPlaying;
+            }
+            if (FullscreenOverlay.IsVisible)
+            {
+                if (FsSpectrum.IsVisible || !FsSpectrum.IsSettled) FsSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
+                if (FsArtSpectrum.IsVisible || !FsArtSpectrum.IsSettled) FsArtSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
+                if (_audio.CurrentTrack is not null) FsArtSpectrumPlate.IsVisible = _audio.IsPlaying;
+            }
         }
         string? activeTrackId = _audio.CurrentTrack?.Id;
         for (int i = _trackArtSpectra.Count - 1; i >= 0; i--)
@@ -1116,6 +1282,12 @@ public partial class MainWindow : Window
 
         if (active >= 0 && active < _dockLyricBlocks.Count) KeepLyricInComfortBand(_dockLyricBlocks[active], _dockLyricsScroller);
         if (active >= 0 && active < _fsLyricBlocks.Count && FullscreenOverlay.IsVisible) KeepLyricInComfortBand(_fsLyricBlocks[active], FsLyricsScroller);
+    }
+
+    private void RefreshLyricsAfterSeek()
+    {
+        _lastActiveLyricIdx = -1;
+        if (!_audio.IsLoading) SyncActiveLyricHighlight(_audio.PositionSeconds);
     }
 
     private string GetDisplayLyricText(LyricLine line)
@@ -1217,19 +1389,17 @@ public partial class MainWindow : Window
         if (_flowLyricLine1 is not null && _flowDisplayedLyricLine1 != first)
         {
             _flowDisplayedLyricLine1 = first;
-            _flowLyricLine1.Opacity = 0.16; _flowLyricLine1.FontSize = 19; _flowLyricLine1.Inlines?.Clear(); _flowLyricLine1.Text = first;
-            Dispatcher.UIThread.Post(() => { if (_flowLyricLine1 is not null) { _flowLyricLine1.Opacity = 1; _flowLyricLine1.FontSize = 25; } }, DispatcherPriority.Background);
+            _flowLyricLine1.Opacity = 1;
+            _flowLyricLine1.FontSize = 25;
+            _flowLyricLine1.Inlines?.Clear();
+            _flowLyricLine1.Text = first;
         }
         if (_flowLyricLine2 is not null && _flowDisplayedLyricLine2 != second)
         {
             _flowDisplayedLyricLine2 = second;
-            _flowLyricLine2.Opacity = 0.38; _flowLyricLine2.FontSize = 14; _flowLyricLine2.Text = second;
-            Dispatcher.UIThread.Post(() => { if (_flowLyricLine2 is not null) { _flowLyricLine2.Opacity = 0.82; _flowLyricLine2.FontSize = 16; } }, DispatcherPriority.Background);
-        }
-        if (_flowLyricCard is not null)
-        {
-            _flowLyricCard.Opacity = 0.78;
-            Dispatcher.UIThread.Post(() => { if (_flowLyricCard is not null) _flowLyricCard.Opacity = 1; }, DispatcherPriority.Background);
+            _flowLyricLine2.Opacity = 0.82;
+            _flowLyricLine2.FontSize = 16;
+            _flowLyricLine2.Text = second;
         }
     }
 
@@ -1307,7 +1477,6 @@ public partial class MainWindow : Window
             FsBackdropImg.Source = bmp;
             MiniArtImg.Source = bmp;
             if (_activeNavKey == "flow") RefreshMusicFlowCardUi();
-            if (_dockOpen && _dockTab == "now") RenderRightDock();
         }
 
         await lyricsTask;
@@ -1325,7 +1494,14 @@ public partial class MainWindow : Window
             _relatedTracks = relTask.IsCompletedSuccessfully
                 ? relTask.Result.Where(x => x.Id != track.Id).Take(12).ToList()
                 : new List<TrackItem>();
-            if (_dockOpen && (_dockTab == "dna" || _dockTab == "now")) RenderRightDock();
+            if (_dockOpen && _dockTab == "dna")
+                RenderRightDock();
+            else if (_dockOpen && _dockTab == "now" && _currentDna is { } dna
+                && _dockNowStack is { } nowStack && !_dockDnaCardAdded)
+            {
+                nowStack.Children.Add(SectionCard("About the track", dna.TrackStory));
+                _dockDnaCardAdded = true;
+            }
         }
     }
 
@@ -1474,7 +1650,7 @@ public partial class MainWindow : Window
         NowPlayingArtistText.Text = _audio.IsLoading
             ? "Buffering stream..."
             : (_audio.LastError is { Length: > 0 } err ? $"Stream error: {err}" : (tr?.ArtistNames ?? "Pick something to start"));
-        FsTitleText.Text = NowPlayingTitleText.Text;
+        FsTitleText.Text = tr?.Title ?? "Nothing playing";
         FsArtistText.Text = tr?.ArtistNames ?? "";
         FsHeaderSubText.Text = tr?.Album?.Name ?? tr?.ArtistNames ?? "Echo Music";
         MiniTitleText.Text = tr?.Title ?? "Echo Music";
@@ -1490,21 +1666,21 @@ public partial class MainWindow : Window
         FsScallop.InvalidateVisual();
 
         MiniScallop.IsPlaying = _audio.IsPlaying;
-        MiniScallop.IsLoading = _audio.IsPlaying;
-        MiniScallop.InvalidateVisual();
+        MiniScallop.IsLoading = _audio.IsLoading;
+        EnsureVisualMotionTimerRunning();
 
-        if (_audio.CurrentStreamInfo is { } si)
+        if (_store.Settings.ShowStreamQualityLabel && _audio.CurrentStreamInfo is { } si)
         {
             StreamQualityPill.IsVisible = true;
             var codecShort = si.Codec.Contains("opus", StringComparison.OrdinalIgnoreCase) ? "OPUS" : "AAC";
             StreamQualityText.Text = $"{codecShort} {Math.Max(48, si.Bitrate / 1000)}K";
         }
-        else if (tr?.IsLocal == true)
+        else if (_store.Settings.ShowStreamQualityLabel && tr?.IsLocal == true)
         {
             StreamQualityPill.IsVisible = true;
             StreamQualityText.Text = Path.GetExtension(tr.LocalFilePath ?? "").TrimStart('.').ToUpperInvariant();
         }
-        else if (tr is not null && _store.IsDownloaded(tr.Id))
+        else if (_store.Settings.ShowStreamQualityLabel && tr is not null && _store.IsDownloaded(tr.Id))
         {
             StreamQualityPill.IsVisible = true;
             StreamQualityText.Text = "OFFLINE";
@@ -1640,8 +1816,16 @@ public partial class MainWindow : Window
     {
         LikedCountBadge.Text = _store.LikedSongs.Count.ToString();
         DownloadsCountBadge.Text = _store.Downloads.Count(d => d.Status == "done").ToString();
+        string playlistFingerprint = string.Join("\u001f", _store.Playlists.Select(pl => string.Join("\u001e",
+            pl.Id, pl.Name, pl.CustomCoverPath ?? "", pl.Tracks.Count.ToString(),
+            string.Join(",", pl.Tracks.Take(4).Select(track => track.Id + ":" + track.Thumbnail)))));
+        if (string.Equals(_sidebarPlaylistFingerprint, playlistFingerprint, StringComparison.Ordinal)) return;
+        _sidebarPlaylistFingerprint = playlistFingerprint;
 
+        foreach (var oldLabel in SidebarPlaylistsPanel.GetVisualDescendants().OfType<TextBlock>())
+            _sidebarTextOriginalVisibility.Remove(oldLabel);
         SidebarPlaylistsPanel.Children.Clear();
+        bool compactSidebar = _leftSidebarMode == "Compact";
         foreach (var pl in _store.Playlists)
         {
             var captured = pl;
@@ -1655,15 +1839,32 @@ public partial class MainWindow : Window
             var playlistCover = BuildLocalPlaylistCover(captured, 40);
             playlistCover.Margin = new Thickness(-2, 0, 0, 0);
             row.Children.Add(playlistCover);
-            var label = new TextBlock { Text = captured.Name, FontSize = 12.5, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 2, 0) };
+            var label = new TextBlock { Text = captured.Name, FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 2, 0), IsVisible = !compactSidebar };
+            _sidebarTextOriginalVisibility[label] = true;
             Grid.SetColumn(label, 1); row.Children.Add(label);
-            var cnt = new TextBlock { Text = captured.Tracks.Count.ToString(), FontSize = 10.5, Foreground = ResBrush("TextMutedBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0) };
+            var cnt = new TextBlock { Text = captured.Tracks.Count.ToString(), FontSize = 10.5, Foreground = ResBrush("TextMutedBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 0, 0), IsVisible = !compactSidebar };
+            _sidebarTextOriginalVisibility[cnt] = true;
             Grid.SetColumn(cnt, 2); row.Children.Add(cnt);
             btn.Content = row;
             btn.Click += async (_, _) => await NavigateToAsync("pl:" + captured.Id, () => { RenderLocalPlaylistDetail(captured); return Task.CompletedTask; });
             SidebarPlaylistsPanel.Children.Add(btn);
+            if (compactSidebar)
+            {
+                row.Width = 40;
+                row.HorizontalAlignment = HorizontalAlignment.Left;
+                row.ColumnDefinitions = ColumnDefinitions.Parse("Auto,0,0");
+                for (int childIndex = 0; childIndex < row.Children.Count; childIndex++)
+                {
+                    var child = row.Children[childIndex];
+                    Grid.SetColumn(child, 0);
+                    child.HorizontalAlignment = HorizontalAlignment.Center;
+                    if (child is Border cover) cover.Margin = new Thickness(0);
+                }
+            }
         }
         UpdateSidebarCompactVisuals();
+        if (compactSidebar)
+            Dispatcher.UIThread.Post(UpdateSidebarCompactVisuals, DispatcherPriority.Loaded);
     }
 
     internal void RefreshAccountBadge()
@@ -1759,9 +1960,9 @@ public partial class MainWindow : Window
 
         double phase = -0.2;
         bool ownsShimmer = false;
-        var shimmerTimer = new DispatcherTimer(IsResourceSaverActive ? TimeSpan.FromMilliseconds(33) : TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, (_, _) =>
+        var shimmerTimer = new DispatcherTimer(AnimationFrameInterval, DispatcherPriority.Render, (_, _) =>
         {
-            phase += IsResourceSaverActive ? 0.022 : 0.011;
+            phase += AnimationFrameInterval.TotalSeconds * 0.6875;
             if (phase > 1.35) phase = -0.2;
             for (int i = 0; i < shimmerStops.Count; i++)
             {
@@ -1891,9 +2092,9 @@ public partial class MainWindow : Window
         if (e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
         Control? current = e.Source as Control;
 
-        // Wheel-over controls tunes that exact control; the three song-seek sliders remain exempt.
         for (var probe = current; probe is not null; probe = probe.Parent as Control)
         {
+            if (probe is ScrollBar) return;
             if (probe is SeekProgressControl progressControl)
             {
                 if (progressControl == VolumeSlider && Math.Abs(e.Delta.Y) >= 0.01)
@@ -1908,82 +2109,142 @@ public partial class MainWindow : Window
             if (Math.Abs(e.Delta.Y) < 0.01) return;
             double range = Math.Max(0.01, slider.Maximum - slider.Minimum);
             double step = range * 0.035;
-            double direction = Math.Sign(e.Delta.Y);
-            slider.Value = Math.Clamp(slider.Value + direction * step, slider.Minimum, slider.Maximum);
+            slider.Value = Math.Clamp(slider.Value + Math.Sign(e.Delta.Y) * step, slider.Minimum, slider.Maximum);
             e.Handled = true;
             return;
         }
 
-        // Skip horizontal-only nested shelves and find the nearest scrollable vertical parent.
+        double wheel = NormalizeWheelDelta(e.Delta.Y);
+        if (Math.Abs(wheel) < 0.0001) return;
         ScrollViewer? viewer = null;
+        double maxY = 0;
+        double currentY = 0;
         for (var probe = current; probe is not null; probe = probe.Parent as Control)
         {
-            if (probe is ScrollViewer candidate && candidate.Extent.Height - candidate.Viewport.Height > 1)
-            {
-                viewer = candidate;
-                break;
-            }
+            if (probe is not ScrollViewer candidate) continue;
+            double candidateMax = Math.Max(0, candidate.Extent.Height - candidate.Viewport.Height);
+            if (candidateMax <= 1) continue;
+            double candidateY = _smoothScrollStates.TryGetValue(candidate, out var existing)
+                ? existing.TargetY : candidate.Offset.Y;
+            bool canMove = wheel > 0 ? candidateY > 0.25 : candidateY < candidateMax - 0.25;
+            if (!canMove) continue; // let nested scrolls hand off naturally at their edges
+            viewer = candidate;
+            maxY = candidateMax;
+            currentY = candidateY;
+            break;
         }
         if (viewer is null) return;
 
-        var maxX = Math.Max(0, viewer.Extent.Width - viewer.Viewport.Width);
-        var maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
-        double ticks = Math.Clamp(e.Delta.Y, -4, 4);
-        if (Math.Abs(ticks) < 0.01) return;
-        double stepPixels = Math.Clamp(viewer.Viewport.Height * 0.115, 70, 118);
-        var origin = _smoothScrollTargets.TryGetValue(viewer, out var pending) ? pending : viewer.Offset;
-        double targetY = Math.Clamp(origin.Y - ticks * stepPixels, 0, maxY);
-        if (Math.Abs(targetY - origin.Y) < 0.25) return;
+        // Keep the wheel's distance; small touchpad deltas stay fractional and are not discarded.
+        double pixelsPerUnit = Math.Clamp(viewer.Viewport.Height * 0.115, 72, 100);
+        double targetY = Math.Clamp(currentY - wheel * pixelsPerUnit, 0, maxY);
+        if (Math.Abs(targetY - currentY) < 0.01) return;
         e.Handled = true;
-        SmoothScrollTo(viewer, new Vector(Math.Clamp(origin.X, 0, maxX), targetY));
+        QueueSmoothScrollTarget(viewer, viewer.Offset.X, targetY);
     }
 
-    private void StopSmoothScroll(ScrollViewer viewer)
+    private static double NormalizeWheelDelta(double raw)
     {
-        if (_smoothScrollTimers.Remove(viewer, out var timer)) timer.Stop();
-        _smoothScrollTargets.Remove(viewer);
+        if (!double.IsFinite(raw)) return 0;
+        // Avalonia normally supplies notch units; normalize drivers that report Windows' 120-unit ticks.
+        return Math.Abs(raw) > 4 ? raw / 120.0 : raw;
     }
+
+    private void StopSmoothScroll(ScrollViewer viewer) => _smoothScrollStates.Remove(viewer);
 
     private void SmoothScrollTo(ScrollViewer viewer, Vector target)
     {
         var maxX = Math.Max(0, viewer.Extent.Width - viewer.Viewport.Width);
         var maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
-        target = new Vector(Math.Clamp(target.X, 0, maxX), Math.Clamp(target.Y, 0, maxY));
-        _smoothScrollTargets[viewer] = target;
-        if (_smoothScrollTimers.ContainsKey(viewer)) return;
+        QueueSmoothScrollTarget(viewer, Math.Clamp(target.X, 0, maxX), Math.Clamp(target.Y, 0, maxY));
+    }
 
-        DispatcherTimer? timer = null;
-        var lastTickUtc = DateTime.UtcNow;
-        timer = new DispatcherTimer(TimeSpan.FromMilliseconds(8), DispatcherPriority.Render, (_, _) =>
+    private void QueueSmoothScrollTarget(ScrollViewer viewer, double targetX, double targetY)
+    {
+        var maxX = Math.Max(0, viewer.Extent.Width - viewer.Viewport.Width);
+        var maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
+        targetX = Math.Clamp(targetX, 0, maxX);
+        targetY = Math.Clamp(targetY, 0, maxY);
+        if (!_smoothScrollStates.TryGetValue(viewer, out var state))
         {
-            if (!viewer.IsVisible || !_smoothScrollTargets.TryGetValue(viewer, out var destination))
+            state = new SmoothScrollState { TargetX = viewer.Offset.X, TargetY = viewer.Offset.Y };
+            _smoothScrollStates[viewer] = state;
+        }
+        state.TargetX = targetX;
+        state.TargetY = targetY;
+        EnsureAnimationFramePump();
+    }
+
+    private void EnsureAnimationFramePump()
+    {
+        if (_animationFramePending || !IsVisible || WindowState == WindowState.Minimized) return;
+        _animationFramePending = true;
+        RequestAnimationFrame(AdvanceAnimationFrame);
+    }
+
+    private void AdvanceAnimationFrame(TimeSpan frameTime)
+    {
+        _animationFramePending = false;
+        if (!IsVisible || WindowState == WindowState.Minimized)
+        {
+            _hasLastMotionFrame = false;
+            return;
+        }
+
+        double elapsed = _hasLastMotionFrame ? (frameTime - _lastMotionFrameTime).TotalSeconds : 1.0 / 60.0;
+        _lastMotionFrameTime = frameTime;
+        _hasLastMotionFrame = true;
+        int cap = IsResourceSaverActive ? 30 : CurrentPerformanceMode switch { "Low" => 30, "Auto" => 60, _ => 0 };
+        if (cap > 0 && _lastMotionUpdateTime != TimeSpan.Zero
+            && (frameTime - _lastMotionUpdateTime).TotalSeconds < 1.0 / cap)
+        {
+            EnsureAnimationFramePump();
+            return;
+        }
+        _lastMotionUpdateTime = frameTime;
+        elapsed = Math.Clamp(elapsed, 0.001, 0.05);
+        AdvanceSmoothScrolls(elapsed);
+        ScrollingTitleTextBlock.AdvanceMarquees(elapsed, DateTime.UtcNow);
+
+        if (_smoothScrollStates.Count > 0 || ScrollingTitleTextBlock.HasActiveMarquees)
+            EnsureAnimationFramePump();
+    }
+
+    private void AdvanceSmoothScrolls(double elapsedSeconds)
+    {
+        const double omega = 19.0; // critically damped spring; independent of wheel-event cadence
+        foreach (var pair in _smoothScrollStates.ToArray())
+        {
+            var viewer = pair.Key;
+            var state = pair.Value;
+            if (!viewer.IsVisible || viewer.GetVisualRoot() is null)
             {
-                timer!.Stop();
-                _smoothScrollTimers.Remove(viewer);
-                _smoothScrollTargets.Remove(viewer);
-                return;
+                _smoothScrollStates.Remove(viewer);
+                continue;
             }
 
-            var now = viewer.Offset;
-            var dx = destination.X - now.X;
-            var dy = destination.Y - now.Y;
-            if (Math.Abs(dx) < 0.4 && Math.Abs(dy) < 0.5)
+            var offset = viewer.Offset;
+            double dx = state.TargetX - offset.X;
+            double dy = state.TargetY - offset.Y;
+            state.VelocityX += (omega * omega * dx - 2 * omega * state.VelocityX) * elapsedSeconds;
+            state.VelocityY += (omega * omega * dy - 2 * omega * state.VelocityY) * elapsedSeconds;
+            double x = offset.X + state.VelocityX * elapsedSeconds;
+            double y = offset.Y + state.VelocityY * elapsedSeconds;
+            double maxX = Math.Max(0, viewer.Extent.Width - viewer.Viewport.Width);
+            double maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
+            x = Math.Clamp(x, 0, maxX);
+            y = Math.Clamp(y, 0, maxY);
+            if (x <= 0 || x >= maxX) state.VelocityX = 0;
+            if (y <= 0 || y >= maxY) state.VelocityY = 0;
+
+            if (Math.Abs(state.TargetX - x) < 0.45 && Math.Abs(state.TargetY - y) < 0.45
+                && Math.Abs(state.VelocityX) < 3 && Math.Abs(state.VelocityY) < 3)
             {
-                viewer.Offset = destination;
-                timer!.Stop();
-                _smoothScrollTimers.Remove(viewer);
-                _smoothScrollTargets.Remove(viewer);
-                return;
+                viewer.Offset = new Vector(state.TargetX, state.TargetY);
+                _smoothScrollStates.Remove(viewer);
             }
-            // Time-based exponential ease-out: 8 ms input updates with frame-rate-independent pacing.
-            var tickUtc = DateTime.UtcNow;
-            double dt = Math.Clamp((tickUtc - lastTickUtc).TotalSeconds, 0.004, 0.05);
-            lastTickUtc = tickUtc;
-            double alpha = 1.0 - Math.Exp(-dt * 19.0);
-            viewer.Offset = new Vector(now.X + dx * alpha, now.Y + dy * alpha);
-        });
-        _smoothScrollTimers[viewer] = timer;
-        timer.Start();
+            else viewer.Offset = new Vector(x, y);
+        }
     }
 
     private void KeepLyricInComfortBand(TextBlock line, ScrollViewer? viewer)
@@ -2002,7 +2263,12 @@ public partial class MainWindow : Window
         SmoothScrollTo(viewer, new Vector(viewer.Offset.X, target));
     }
 
-    private static string NormalizeSidebarMode(string? mode) => mode is "Compact" or "Hidden" ? mode : "Expanded";
+    private static string NormalizeSidebarMode(string? mode) => (mode ?? "").Trim().ToLowerInvariant() switch
+    {
+        "compact" or "icons-only" or "iconsonly" or "icon only" => "Compact",
+        "hidden" => "Hidden",
+        _ => "Expanded",
+    };
 
     private void UpdateSidebarCompactVisuals()
     {
@@ -2187,7 +2453,7 @@ public partial class MainWindow : Window
 
         DateTime started = DateTime.UtcNow;
         DispatcherTimer? timer = null;
-        timer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, (_, _) =>
+        timer = new DispatcherTimer(AnimationFrameInterval, DispatcherPriority.Render, (_, _) =>
         {
             var current = leftSidebar ? _leftSidebarAnimation : _rightSidebarAnimation;
             if (!ReferenceEquals(current, timer))
@@ -2246,6 +2512,64 @@ public partial class MainWindow : Window
             icon.Foreground = _dockOpen && _dockTab == "lyrics" ? ResBrush("AccentBrush") : ResBrush("TextSecondaryBrush");
     }
 
+    private Control BuildQueueSourceCard(PlaybackCollectionContext source)
+    {
+        var card = new Border
+        {
+            Background = ResBrush("AccentSoftBrush"),
+            BorderBrush = ResBrush("AccentBrush"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(10),
+            Margin = new Thickness(0, 0, 0, 9),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        var row = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("3,10,52,*") };
+        row.Children.Add(new Border { Width = 3, CornerRadius = new CornerRadius(2), Background = ResBrush("AccentBrush") });
+        Control cover;
+        var local = source.IsLocal ? _store.Playlists.FirstOrDefault(p => p.Id == source.Id) : null;
+        if (local is not null)
+            cover = BuildLocalPlaylistCover(local, 48);
+        else
+        {
+            var image = new Image { Width = 48, Height = 48, Stretch = Stretch.UniformToFill };
+            LoadImageInto(image, source.Thumbnail, BuildGeneratedMediaCover(
+                new MediaCardItem { Id = source.Id, Kind = "playlist", Title = source.Title }, 48));
+            cover = new Border { Width = 48, Height = 48, CornerRadius = new CornerRadius(6), ClipToBounds = true, Child = image };
+        }
+        Grid.SetColumn(cover, 2);
+        row.Children.Add(cover);
+        var meta = new StackPanel { Spacing = 4, VerticalAlignment = VerticalAlignment.Center, ClipToBounds = true };
+        var sourceLabel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5, VerticalAlignment = VerticalAlignment.Center };
+        sourceLabel.Children.Add(new PathIcon { Data = Icons.Library, Width = 11, Height = 11, Foreground = ResBrush("AccentBrush") });
+        bool albumSource = string.Equals(source.Kind, "album", StringComparison.OrdinalIgnoreCase);
+        sourceLabel.Children.Add(new TextBlock { Text = albumSource ? "ALBUM SOURCE" : "PLAYLIST SOURCE", FontSize = 9, FontWeight = FontWeight.ExtraBold, Foreground = ResBrush("AccentBrush"), LetterSpacing = 0.65 });
+        meta.Children.Add(sourceLabel);
+        meta.Children.Add(new TextBlock { Text = source.Title, FontSize = 12.5, FontWeight = FontWeight.Bold });
+        meta.Children.Add(new TextBlock { Text = source.IsLocal ? "Local playlist" : albumSource ? "YouTube Music album" : "YouTube Music playlist", FontSize = 10.5, Foreground = ResBrush("TextSecondaryBrush") });
+        Grid.SetColumn(meta, 3);
+        row.Children.Add(meta);
+        card.Child = row;
+        ToolTip.SetTip(card, albumSource ? "Album source for the queue — open this album in the main view" : "Playlist source for the queue — open this playlist in the main view");
+        card.PointerPressed += async (_, ev) =>
+        {
+            if (!ev.GetCurrentPoint(card).Properties.IsLeftButtonPressed) return;
+            ev.Handled = true;
+            await NavigateToAsync((albumSource ? "album:" : "playlist:") + source.Id, () =>
+            {
+                if (source.IsLocal)
+                {
+                    var playlist = _store.Playlists.FirstOrDefault(p => p.Id == source.Id);
+                    if (playlist is not null) RenderLocalPlaylistDetail(playlist);
+                    else SetCenterContent(ErrorCard("Playlist no longer exists", "This local playlist was deleted.", () => RenderLibraryView("playlists")));
+                    return Task.CompletedTask;
+                }
+                return albumSource ? LoadAlbumDetailAsync(source.Id) : LoadPlaylistDetailAsync(source.Id);
+            });
+        };
+        return card;
+    }
+
     private void RenderRightDock()
     {
         var tabPairs = new (string Id, Button Btn)[]
@@ -2266,11 +2590,14 @@ public partial class MainWindow : Window
         _dockLyricBlocks.Clear();
         _dockLyricWordRuns.Clear();
         _dockLyricsScroller = null;
+        _dockNowStack = null;
+        _dockDnaCardAdded = false;
 
         if (_dockTab == "now")
         {
             var sv = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             var stack = new StackPanel { Spacing = 14, Margin = new Thickness(0, 2, 2, 16) };
+            _dockNowStack = stack;
 
             var tr = _audio.CurrentTrack ?? _cachedHome?.Shelves.SelectMany(s => s.Tracks).FirstOrDefault();
             if (tr is null)
@@ -2346,10 +2673,10 @@ public partial class MainWindow : Window
 
                 var metaRow = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,Auto") };
                 var metaText = new StackPanel { Spacing = 3, Margin = new Thickness(0, 0, 8, 0), ClipToBounds = true };
-                metaText.Children.Add(new TextBlock { Text = tr.Title, FontSize = 17, FontWeight = FontWeight.Bold, TextTrimming = TextTrimming.CharacterEllipsis });
-                metaText.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 13, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                metaText.Children.Add(new ScrollingTitleTextBlock { Text = tr.Title, FontSize = 17, FontWeight = FontWeight.Bold });
+                metaText.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 13, Foreground = ResBrush("TextSecondaryBrush") });
                 if (!string.IsNullOrWhiteSpace(tr.AlbumArtist) && !string.Equals(tr.AlbumArtist, tr.ArtistNames, StringComparison.OrdinalIgnoreCase))
-                    metaText.Children.Add(new TextBlock { Text = $"Album artist · {tr.AlbumArtist}", FontSize = 11.5, Foreground = ResBrush("TextMutedBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                    metaText.Children.Add(new TextBlock { Text = $"Album artist · {tr.AlbumArtist}", FontSize = 11.5, Foreground = ResBrush("TextMutedBrush") });
                 metaRow.Children.Add(metaText);
 
                 var quickPlayOrLike = new Button
@@ -2408,8 +2735,8 @@ public partial class MainWindow : Window
                     LoadImageInto(nimg, nextTr.Thumbnail);
                     nr.Children.Add(new Border { Width = 40, Height = 40, CornerRadius = new CornerRadius(6), ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = nimg });
                     var nm = new StackPanel { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, ClipToBounds = true };
-                    nm.Children.Add(new TextBlock { Text = nextTr.Title, FontSize = 13, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-                    nm.Children.Add(new TextBlock { Text = nextTr.ArtistNames, FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                    nm.Children.Add(new ScrollingTitleTextBlock { Text = nextTr.Title, FontSize = 13, FontWeight = FontWeight.SemiBold });
+                    nm.Children.Add(new TextBlock { Text = nextTr.ArtistNames, FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush") });
                     Grid.SetColumn(nm, 1);
                     nr.Children.Add(nm);
                     ns.Children.Add(nr);
@@ -2420,7 +2747,10 @@ public partial class MainWindow : Window
 
                 // Credits / Music DNA Card
                 if (_currentDna is not null)
+                {
                     stack.Children.Add(SectionCard("About the track", _currentDna.TrackStory));
+                    _dockDnaCardAdded = true;
+                }
             }
 
             sv.Content = stack;
@@ -2456,6 +2786,8 @@ public partial class MainWindow : Window
 
             var sv = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             var stack = new StackPanel { Spacing = 4 };
+            if (_audio.QueueSource is { } queueSource)
+                stack.Children.Add(BuildQueueSourceCard(queueSource));
             for (int i = 0; i < _audio.Queue.Count; i++)
             {
                 int idx = i;
@@ -2478,8 +2810,8 @@ public partial class MainWindow : Window
                     VerticalAlignment = VerticalAlignment.Center,
                 });
                 var meta = new StackPanel { Spacing = 1, ClipToBounds = true, Margin = new Thickness(0, 0, 6, 0) };
-                meta.Children.Add(new TextBlock { Text = tr.Title, FontSize = 12.5, FontWeight = isCur ? FontWeight.Bold : FontWeight.SemiBold, Foreground = isCur ? ResBrush("AccentBrush") : ResBrush("TextPrimaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
-                meta.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 11, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                meta.Children.Add(new ScrollingTitleTextBlock { Text = tr.Title, FontSize = 12.5, FontWeight = isCur ? FontWeight.Bold : FontWeight.SemiBold, Foreground = isCur ? ResBrush("AccentBrush") : ResBrush("TextPrimaryBrush") });
+                meta.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 11, Foreground = ResBrush("TextSecondaryBrush") });
                 Grid.SetColumn(meta, 1);
                 g.Children.Add(meta);
 
@@ -2646,8 +2978,8 @@ public partial class MainWindow : Window
                         LoadImageInto(rimg, captured.Thumbnail);
                         rg.Children.Add(new Border { Width = 38, Height = 38, CornerRadius = new CornerRadius(5), ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = rimg });
                         var rm = new StackPanel { Margin = new Thickness(10, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center, ClipToBounds = true };
-                        rm.Children.Add(new TextBlock { Text = captured.Title, FontSize = 12.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-                        rm.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 11, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                        rm.Children.Add(new ScrollingTitleTextBlock { Text = captured.Title, FontSize = 12.5, FontWeight = FontWeight.SemiBold });
+                        rm.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 11, Foreground = ResBrush("TextSecondaryBrush") });
                         Grid.SetColumn(rm, 1);
                         rg.Children.Add(rm);
                         rCard.Child = rg;
@@ -2678,6 +3010,7 @@ public partial class MainWindow : Window
         double offset = 0;
         if (_audio.CurrentTrack is { } track) _store.LyricOffsets.TryGetValue(track.Id, out offset);
         _audio.Seek(Math.Max(0, lyricTimeSeconds - offset));
+        RefreshLyricsAfterSeek();
     }
 
     private void AdjustLyricOffset(double delta)
@@ -2693,6 +3026,36 @@ public partial class MainWindow : Window
 
     // --------------------------------------------------------- Live Search Suggestions
 
+    internal bool SearchSuggestionsOpen => SearchSuggestFlyout.IsOpen;
+    internal int SearchSuggestionsCount => _searchSuggestionButtons.Count;
+
+    private void SetSearchSuggestionsVisible(bool visible)
+    {
+        _searchSuggestFadeTimer?.Stop();
+        if (visible)
+        {
+            SearchSuggestPopup.Width = Math.Max(1, GlobalSearchBox.Bounds.Width);
+            SearchSuggestPopup.IsVisible = true;
+            SearchSuggestPopup.IsHitTestVisible = true;
+            SearchSuggestFlyout.IsOpen = true;
+            SearchSuggestPopup.Opacity = 1;
+            return;
+        }
+        if (!SearchSuggestPopup.IsVisible) return;
+        SearchSuggestPopup.IsHitTestVisible = false;
+        SearchSuggestPopup.Opacity = 0;
+        _searchSuggestFadeTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(145), DispatcherPriority.Background, (_, _) =>
+        {
+            _searchSuggestFadeTimer?.Stop();
+            if (!SearchSuggestPopup.IsHitTestVisible)
+            {
+                SearchSuggestPopup.IsVisible = false;
+                SearchSuggestFlyout.IsOpen = false;
+            }
+        });
+        _searchSuggestFadeTimer.Start();
+    }
+
     private async void OnSearchBoxTextChanged(object? sender, TextChangedEventArgs e)
     {
         var txt = GlobalSearchBox.Text?.Trim() ?? "";
@@ -2700,7 +3063,7 @@ public partial class MainWindow : Window
         _suggestCts?.Cancel();
         if (txt.Length < 2 || !GlobalSearchBox.IsFocused)
         {
-            SearchSuggestPopup.IsVisible = false;
+            SetSearchSuggestionsVisible(false);
             return;
         }
         var cts = new CancellationTokenSource();
@@ -2711,7 +3074,7 @@ public partial class MainWindow : Window
             var list = await _yt.SuggestAsync(txt, cts.Token);
             if (cts.Token.IsCancellationRequested || list.Count == 0)
             {
-                SearchSuggestPopup.IsVisible = false;
+                SetSearchSuggestionsVisible(false);
                 return;
             }
             SearchSuggestList.Children.Clear();
@@ -2740,7 +3103,7 @@ public partial class MainWindow : Window
                 _searchSuggestionTexts.Add(captured);
                 SearchSuggestList.Children.Add(btn);
             }
-            SearchSuggestPopup.IsVisible = true;
+            SetSearchSuggestionsVisible(true);
         }
         catch { }
     }
@@ -2765,7 +3128,7 @@ public partial class MainWindow : Window
         query = query.Trim();
         if (query.Length == 0) return;
         GlobalSearchBox.Text = query;
-        SearchSuggestPopup.IsVisible = false;
+        SetSearchSuggestionsVisible(false);
         _searchSuggestionIndex = -1;
         _store.AddRecentSearch(query);
         await NavigateToAsync("search", () => ExecuteSearchViewAsync(query, "all"));
@@ -3040,7 +3403,7 @@ public partial class MainWindow : Window
                     bool swapped = false;
                     var started = DateTime.UtcNow;
                     DispatcherTimer? fade = null;
-                    fade = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, (_, _) =>
+                    fade = new DispatcherTimer(AnimationFrameInterval, DispatcherPriority.Render, (_, _) =>
                     {
                         if (generation != fadeGeneration) { fade!.Stop(); return; }
                         double progress = Math.Clamp((DateTime.UtcNow - started).TotalMilliseconds / 360.0, 0, 1);
@@ -3262,7 +3625,7 @@ public partial class MainWindow : Window
         });
         actions.Children.Add(saveBtn);
         Button moreOptionsBtn = null!;
-        moreOptionsBtn = BuildIconActionButton(Icons.More, "Spotlight options", () => BuildTrackContextMenu(mainTrack).Open(moreOptionsBtn));
+        moreOptionsBtn = BuildIconActionButton(Icons.More, "Spotlight options", () => OpenTrackContextMenu(mainTrack, null, moreOptionsBtn, PlacementMode.Bottom));
         actions.Children.Add(moreOptionsBtn);
         info.Children.Add(actions);
 
@@ -3361,8 +3724,8 @@ public partial class MainWindow : Window
                         rowGrid.Children.Add(art);
 
                         var meta = new StackPanel { Margin = new Thickness(6, 0, 3, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 1, ClipToBounds = true };
-                        meta.Children.Add(new TextBlock { Text = tr.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-                        meta.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 12, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                        meta.Children.Add(new ScrollingTitleTextBlock { Text = tr.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+                        meta.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 12, Foreground = ResBrush("TextSecondaryBrush") });
                         Grid.SetColumn(meta, 2);
                         rowGrid.Children.Add(meta);
 
@@ -3715,8 +4078,8 @@ public partial class MainWindow : Window
             rg.Children.Add(new Border { Width = 40, Height = 40, CornerRadius = new CornerRadius(5), ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = rimg });
 
             var rmeta = new StackPanel { Margin = new Thickness(10, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 1, ClipToBounds = true };
-            rmeta.Children.Add(new TextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-            rmeta.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 12, FontWeight = FontWeight.Medium, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+            rmeta.Children.Add(new ScrollingTitleTextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+            rmeta.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 12, FontWeight = FontWeight.Medium, Foreground = ResBrush("TextSecondaryBrush") });
             Grid.SetColumn(rmeta, 1);
             rg.Children.Add(rmeta);
 
@@ -4001,6 +4364,16 @@ public partial class MainWindow : Window
     internal void RenderDetailPage(DetailPageResult page, LocalPlaylist? localOwner = null)
     {
         var root = new StackPanel { Spacing = 20 };
+        PlaybackCollectionContext? playbackSource = localOwner is not null || page.Kind is "playlist" or "album"
+            ? new PlaybackCollectionContext
+            {
+                Id = page.Id,
+                Title = page.Title,
+                Thumbnail = page.Thumbnail,
+                IsLocal = localOwner is not null,
+                Kind = localOwner is not null ? "playlist" : page.Kind,
+            }
+            : null;
 
         var hdrBorder = new Border
         {
@@ -4043,18 +4416,18 @@ public partial class MainWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         if (!string.IsNullOrWhiteSpace(page.Subtitle))
-            infoStack.Children.Add(new TextBlock { Text = page.Subtitle, FontSize = 13.5, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+            infoStack.Children.Add(new TextBlock { Text = page.Subtitle, FontSize = 13.5, Foreground = ResBrush("TextSecondaryBrush") });
         if (!string.IsNullOrWhiteSpace(page.Description))
-            infoStack.Children.Add(new TextBlock { Text = page.Description, FontSize = 12.5, Foreground = ResBrush("TextMutedBrush"), MaxLines = 2, TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.Wrap });
+            infoStack.Children.Add(new TextBlock { Text = page.Description, FontSize = 12.5, Foreground = ResBrush("TextMutedBrush"), MaxLines = 2, TextWrapping = TextWrapping.Wrap });
 
         var btnRow = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         if (page.Tracks.Count > 0)
         {
-            btnRow.Children.Add(BuildIconActionButton(Icons.Play, "Play", async () => await _audio.PlayQueueAsync(page.Tracks, 0, autoRadioIfSingle: false), accent: true, size: 48));
+            btnRow.Children.Add(BuildIconActionButton(Icons.Play, "Play", async () => await _audio.PlayQueueAsync(page.Tracks, 0, autoRadioIfSingle: false, collectionContext: playbackSource), accent: true, size: 48));
             btnRow.Children.Add(BuildIconActionButton(Icons.Shuffle, "Shuffle", async () =>
             {
                 var copy = page.Tracks.Select(t => t.Clone()).OrderBy(_ => Random.Shared.Next()).ToList();
-                await _audio.PlayQueueAsync(copy, 0, autoRadioIfSingle: false);
+                await _audio.PlayQueueAsync(copy, 0, autoRadioIfSingle: false, collectionContext: playbackSource);
             }));
             btnRow.Children.Add(BuildIconActionButton(Icons.Download, "Download all", () =>
             {
@@ -4114,7 +4487,7 @@ public partial class MainWindow : Window
             var subset = string.IsNullOrEmpty(q)
                 ? page.Tracks
                 : page.Tracks.Where(t => t.Title.Contains(q, StringComparison.OrdinalIgnoreCase) || t.ArtistNames.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
-            tableHost.Child = BuildTrackListTable(subset, showIndex: true, localPlaylistOwner: localOwner, showAlbumColumn: page.Kind != "album");
+            tableHost.Child = BuildTrackListTable(subset, showIndex: true, localPlaylistOwner: localOwner, showAlbumColumn: page.Kind != "album", collectionContext: playbackSource);
         }
         if (page.Tracks.Count > 8)
         {
@@ -4320,8 +4693,8 @@ public partial class MainWindow : Window
                 row.Children.Add(new Border { Width = 46, Height = 46, CornerRadius = new CornerRadius(6), ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = img });
 
                 var meta = new StackPanel { Margin = new Thickness(12, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 2, ClipToBounds = true };
-                meta.Children.Add(new TextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-                meta.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 12, FontWeight = FontWeight.Medium, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                meta.Children.Add(new ScrollingTitleTextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+                meta.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 12, FontWeight = FontWeight.Medium, Foreground = ResBrush("TextSecondaryBrush") });
                 Grid.SetColumn(meta, 1);
                 row.Children.Add(meta);
 
@@ -4595,6 +4968,10 @@ public partial class MainWindow : Window
                 return;
             }
             if (!ev.GetCurrentPoint(border).Properties.IsLeftButtonPressed) return;
+            // Your Library's local/Spotify playlist tiles attach their own local detail route.
+            // Do not also start the generic YouTube playlist request; its late response can replace
+            // the local playlist page with an empty remote result.
+            if (localPlaylist) return;
             if (card.Kind == "album")
                 await NavigateToAsync("album:" + card.Id, () => LoadAlbumDetailAsync(card.Id));
             else if (card.Kind == "artist")
@@ -4605,7 +4982,7 @@ public partial class MainWindow : Window
         return border;
     }
 
-    internal Control BuildTrackListTable(List<TrackItem> tracks, bool showIndex, LocalPlaylist? localPlaylistOwner = null, bool showAlbumColumn = true)
+    internal Control BuildTrackListTable(List<TrackItem> tracks, bool showIndex, LocalPlaylist? localPlaylistOwner = null, bool showAlbumColumn = true, PlaybackCollectionContext? collectionContext = null)
     {
         var listStack = new StackPanel { Spacing = 2 };
         string columns = showAlbumColumn ? "30,42,*,150,52,Auto,Auto,Auto" : "30,42,*,0,52,Auto,Auto,Auto";
@@ -4617,7 +4994,7 @@ public partial class MainWindow : Window
             Grid.SetColumn(titleHeader, 2); header.Children.Add(titleHeader);
             if (showAlbumColumn)
             {
-                var albumHeader = new TextBlock { Text = "Album", FontSize = 11.5, Foreground = ResBrush("TextMutedBrush"), VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 0, 8, 0) };
+                var albumHeader = new TextBlock { Text = "Album", FontSize = 11.5, Foreground = ResBrush("TextMutedBrush"), VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 8, 0) };
                 Grid.SetColumn(albumHeader, 3); header.Children.Add(albumHeader);
             }
             listStack.Children.Add(header);
@@ -4671,7 +5048,7 @@ public partial class MainWindow : Window
 
             var titleCol = new StackPanel { Margin = new Thickness(12, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 2, ClipToBounds = true };
             var titleRow = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,Auto") };
-            titleRow.Children.Add(new TextBlock { Text = tr.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+            titleRow.Children.Add(new ScrollingTitleTextBlock { Text = tr.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
             if (tr.Explicit)
             {
                 var expBadge = new Border
@@ -4687,7 +5064,7 @@ public partial class MainWindow : Window
                 titleRow.Children.Add(expBadge);
             }
             titleCol.Children.Add(titleRow);
-            titleCol.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 12, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+            titleCol.Children.Add(new TextBlock { Text = tr.ArtistNames, FontSize = 12, Foreground = ResBrush("TextSecondaryBrush") });
             Grid.SetColumn(titleCol, 2);
             g.Children.Add(titleCol);
 
@@ -4768,7 +5145,7 @@ public partial class MainWindow : Window
             rowBorder.PointerPressed += async (_, ev) =>
             {
                 if (ev.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-                    await _audio.PlayQueueAsync(tracks, idx, autoRadioIfSingle: tracks.Count == 1);
+                    await _audio.PlayQueueAsync(tracks, idx, autoRadioIfSingle: tracks.Count == 1, collectionContext: collectionContext);
             };
             AttachTrackRowInteractions(rowBorder, tr, localPlaylistOwner, moreBtn);
             listStack.Children.Add(rowBorder);
@@ -4793,7 +5170,7 @@ public partial class MainWindow : Window
         btn.Click += (_, ev) =>
         {
             ev.Handled = true;
-            BuildTrackContextMenu(tr, localOwner).Open(btn);
+            OpenTrackContextMenu(tr, localOwner, btn, PlacementMode.Bottom);
         };
         return btn;
     }
@@ -4807,12 +5184,31 @@ public partial class MainWindow : Window
         }
         row.AddHandler(InputElement.PointerPressedEvent, (_, ev) =>
         {
-            if (!ev.GetCurrentPoint(row).Properties.IsRightButtonPressed) return;
-            var menu = BuildTrackContextMenu(track, owner);
-            menu.Placement = PlacementMode.Pointer;
-            menu.Open(row);
+            if (ev.Handled || !ev.GetCurrentPoint(row).Properties.IsRightButtonPressed) return;
+            // Mark handled before opening so a parent row/container cannot open another popup for
+            // the same bubbled right-click.
             ev.Handled = true;
-        }, RoutingStrategies.Bubble, handledEventsToo: true);
+            OpenTrackContextMenu(track, owner, row, PlacementMode.Pointer);
+        }, RoutingStrategies.Bubble);
+    }
+
+    private void OpenTrackContextMenu(TrackItem track, LocalPlaylist? owner, Control anchor, PlacementMode placement)
+    {
+        if (_openTrackContextMenu is { } previous)
+        {
+            _openTrackContextMenu = null;
+            previous.Close();
+        }
+
+        var menu = BuildTrackContextMenu(track, owner);
+        menu.Placement = placement;
+        _openTrackContextMenu = menu;
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_openTrackContextMenu, menu))
+                _openTrackContextMenu = null;
+        };
+        menu.Open(anchor);
     }
 
     private MenuItem BuildIconMenuItem(string label, Geometry? icon = null, IBrush? iconForeground = null)
@@ -5049,8 +5445,8 @@ public partial class MainWindow : Window
                 string kind = item.Kind switch { "artist" => "Artist", "album" => "Album", _ => "Song" };
                 var row = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,Auto"), Margin = new Thickness(0, 1) };
                 var copy = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 10, 0) };
-                copy.Children.Add(new TextBlock { Text = item.Name, FontSize = 13.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
-                copy.Children.Add(new TextBlock { Text = string.IsNullOrWhiteSpace(item.Subtitle) ? kind : $"{kind} · {item.Subtitle}", FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush"), TextTrimming = TextTrimming.CharacterEllipsis });
+                copy.Children.Add(new TextBlock { Text = item.Name, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+                copy.Children.Add(new TextBlock { Text = string.IsNullOrWhiteSpace(item.Subtitle) ? kind : $"{kind} · {item.Subtitle}", FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush") });
                 row.Children.Add(copy);
                 var restore = new Button { Classes = { "pill" }, Content = "Restore", Padding = new Thickness(11, 5), VerticalAlignment = VerticalAlignment.Center };
                 restore.Click += (_, _) => { _store.SetContentExcluded(item.Kind, item.Id, item.Name, item.Subtitle, false); Refresh(); };
@@ -5526,14 +5922,8 @@ public partial class MainWindow : Window
     internal void LoadImageInto(Image target, string? urlOrPath, Control? fallback = null)
     {
         if (string.IsNullOrWhiteSpace(urlOrPath)) return;
-        bool animateImageIn = !IsResourceSaverActive;
-        target.Transitions = animateImageIn
-            ? new Transitions
-            {
-                new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(150), Easing = new CubicEaseOut() },
-            }
-            : null;
-        if (target.Source is null) target.Opacity = animateImageIn ? 0 : 1;
+        target.Transitions = null;
+        target.Opacity = 1;
         Dispatcher.UIThread.Post(() =>
         {
             if (target.Source is not null) return;
@@ -5550,44 +5940,40 @@ public partial class MainWindow : Window
             }
         }, DispatcherPriority.Background);
 
-        _ = Task.Run(async () =>
+        _ = LoadImageIntoAsync(target, urlOrPath, fallback);
+    }
+
+    private async Task LoadImageIntoAsync(Image target, string? urlOrPath, Control? fallback)
+    {
+        Bitmap? bmp = null;
+        try { bmp = await ImageCache.LoadAsync(urlOrPath, _yt.SharedHttp, _store.ArtCacheDir).ConfigureAwait(false); }
+        catch { }
+        Dispatcher.UIThread.Post(() =>
         {
-            Bitmap? bmp = null;
-            try { bmp = await ImageCache.LoadAsync(urlOrPath, _yt.SharedHttp, _store.ArtCacheDir); }
-            catch { }
-            Dispatcher.UIThread.Post(() =>
+            StopImageLoadingShimmer(target);
+            if (bmp is not null)
             {
-                StopImageLoadingShimmer(target);
-                if (bmp is not null)
+                target.Transitions = null;
+                target.Opacity = 1;
+                target.Source = bmp;
+            }
+            else
+            {
+                target.Transitions = null;
+                target.Opacity = 1;
+                if (fallback is not null)
                 {
-                    bool fadeIn = !IsResourceSaverActive;
-                    target.Transitions = fadeIn
-                        ? new Transitions
-                        {
-                            new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(150), Easing = new CubicEaseOut() },
-                        }
-                        : null;
-                    target.Opacity = fadeIn ? 0 : 1;
-                    target.Source = bmp;
-                    if (fadeIn) target.Opacity = 1;
-                }
-                else
-                {
-                    target.Transitions = null;
-                    target.Opacity = 1;
-                    if (fallback is not null)
+                    if (target.Parent is Border frame && ReferenceEquals(frame.Child, target))
+                        frame.Child = fallback;
+                    else if (target.Parent is Panel panel)
                     {
-                        if (target.Parent is Border frame && ReferenceEquals(frame.Child, target))
-                            frame.Child = fallback;
-                        else if (target.Parent is Panel panel)
-                        {
-                            int childIndex = panel.Children.IndexOf(target);
-                            if (childIndex >= 0) panel.Children[childIndex] = fallback;
-                        }
+                        int childIndex = panel.Children.IndexOf(target);
+                        if (childIndex >= 0) panel.Children[childIndex] = fallback;
                     }
                 }
-            });
+            }
         });
+
     }
 
     private void UpdateImageShimmerColors(Color accent)
@@ -5602,9 +5988,7 @@ public partial class MainWindow : Window
     {
         _imageShimmerTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render,
             (_, _) => UpdateImageShimmerFrame());
-        _imageShimmerTimer.Interval = IsResourceSaverActive
-            ? TimeSpan.FromMilliseconds(33)
-            : TimeSpan.FromMilliseconds(16);
+        _imageShimmerTimer.Interval = AnimationFrameInterval;
     }
 
     private void UpdateImageShimmerFrame()
@@ -5631,6 +6015,13 @@ public partial class MainWindow : Window
     private void StartImageLoadingShimmer(Image target)
     {
         if (_imageShimmers.ContainsKey(target) || target.Source is not null) return;
+        if (IsResourceSaverActive)
+        {
+            Control? staticParent = target.Parent as Control;
+            while (staticParent is not null && staticParent is not Border) staticParent = staticParent.Parent as Control;
+            if (staticParent is Border staticFrame) staticFrame.Background = ResBrush("BgSurfaceBrush");
+            return;
+        }
         Control? parent = target.Parent as Control;
         while (parent is not null && parent is not Border) parent = parent.Parent as Control;
         if (parent is not Border frame) return;

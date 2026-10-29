@@ -11,7 +11,7 @@
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <ApplicationIcon>Assets\echo.ico</ApplicationIcon>
     <AssemblyName>EchoMusic</AssemblyName>
-    <Version>2.0.1</Version>
+    <Version>2.0.2</Version>
     <Product>Echo Music</Product>
     <Company>V!SHNU</Company>
     <Copyright>Copyright (C) 2026 Echo Music (GPL-3.0)</Copyright>

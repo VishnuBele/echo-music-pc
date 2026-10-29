@@ -141,6 +141,8 @@ public sealed class AppStore
         // Windows media-session integration stays enabled; expose no user-facing toggle for this required default.
         _db.Settings.SmtcEnabled = true;
         if (_db.Settings.PlayerStyle == "LiquidGlass") _db.Settings.PlayerStyle = "Circle";
+        if (_db.Settings.PlayerSliderStyle is not ("Bar" or "Wavy" or "Slim" or "Squiggly"))
+            _db.Settings.PlayerSliderStyle = "Slim";
         string? saverPolicy = _db.Settings.ResourceSaverPolicy;
         if (saverPolicy is not ("Auto" or "On" or "Off"))
             saverPolicy = _db.Settings.ResourceSaverMode ? "On" : "Auto";
@@ -424,23 +426,74 @@ public sealed class AppStore
 
     // --------------------------------------------------------- Play History & Echo Wrapped
 
-    public void RecordPlay(TrackItem track, long msPlayed, bool wasSkipped)
+    public PlayHistoryEntry RecordPlay(TrackItem track, long msPlayed, bool wasSkipped)
     {
-        History.Insert(0, new PlayHistoryEntry
+        var entry = new PlayHistoryEntry
         {
+            EntryKind = "track",
             VideoId = track.Id,
             Title = track.Title,
             Artists = track.Artists.Select(a => new ArtistRef { Name = a.Name, Id = a.Id }).ToList(),
             Album = track.Album is null ? null : new AlbumRef { Name = track.Album.Name, Id = track.Album.Id },
             Thumbnail = track.Thumbnail,
+            LocalFilePath = track.LocalFilePath,
             DurationSeconds = track.DurationSeconds,
             PlayedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             MsPlayed = msPlayed,
             WasSkipped = wasSkipped,
-        });
+        };
+        History.Insert(0, entry);
+        TrimHistory();
+        SaveDebounced();
+        LibraryChanged?.Invoke();
+        return entry;
+    }
+
+    public void UpdatePlayHistory(PlayHistoryEntry entry, long msPlayed, bool wasSkipped)
+    {
+        if (!History.Contains(entry) || entry.EntryKind != "track") return;
+        entry.MsPlayed = Math.Max(0, msPlayed);
+        entry.PlayedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        entry.WasSkipped = wasSkipped;
+        SaveDebounced();
+        LibraryChanged?.Invoke();
+    }
+
+    public void RecordPlaylistPlay(PlaybackCollectionContext source) => RecordCollectionPlay(source);
+
+    public void RecordCollectionPlay(PlaybackCollectionContext source)
+    {
+        if (string.IsNullOrWhiteSpace(source.Id) || string.IsNullOrWhiteSpace(source.Title)) return;
+        string entryKind = string.Equals(source.Kind, "album", StringComparison.OrdinalIgnoreCase) ? "album" : "playlist";
+        string sourceKind = source.IsLocal ? "local" : "youtube";
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var matches = History.Where(h => h.EntryKind == entryKind
+            && string.Equals(h.PlaylistId, source.Id, StringComparison.Ordinal)
+            && string.Equals(h.PlaylistSource ?? "youtube", sourceKind, StringComparison.OrdinalIgnoreCase)).ToList();
+        var entry = matches.FirstOrDefault();
+        if (entry is null)
+        {
+            entry = new PlayHistoryEntry { EntryKind = entryKind, PlaylistId = source.Id, PlaylistSource = sourceKind };
+        }
+        else
+        {
+            foreach (var duplicate in matches) History.Remove(duplicate);
+        }
+        entry.PlaylistId = source.Id;
+        entry.PlaylistSource = sourceKind;
+        entry.Title = source.Title;
+        entry.Thumbnail = source.Thumbnail;
+        entry.PlayedAt = now;
+        History.Insert(0, entry);
+        TrimHistory();
+        SaveDebounced();
+        LibraryChanged?.Invoke();
+    }
+
+    private void TrimHistory()
+    {
         if (History.Count > 5000)
             History.RemoveRange(5000, History.Count - 5000);
-        SaveDebounced();
     }
 
     public WrappedStats ComputeWrapped(int? daysWindow = null)
@@ -448,7 +501,7 @@ public sealed class AppStore
         long cutoff = daysWindow is int d
             ? DateTimeOffset.UtcNow.AddDays(-d).ToUnixTimeMilliseconds()
             : 0;
-        var items = History.Where(h => h.PlayedAt >= cutoff).ToList();
+        var items = History.Where(h => h.EntryKind == "track" && h.PlayedAt >= cutoff).ToList();
 
         var stats = new WrappedStats
         {
@@ -607,6 +660,11 @@ public sealed class AppStore
                         long end = total < long.MaxValue ? Math.Min(total - 1, offset + chunkSize - 1) : offset + chunkSize - 1;
                         using var req = new HttpRequestMessage(HttpMethod.Get, resolved.Url);
                         req.Headers.TryAddWithoutValidation("User-Agent", resolved.UserAgent);
+                        if (!string.IsNullOrWhiteSpace(resolved.MediaOrigin))
+                        {
+                            req.Headers.TryAddWithoutValidation("Origin", resolved.MediaOrigin);
+                            req.Headers.TryAddWithoutValidation("Referer", resolved.MediaOrigin.TrimEnd('/') + "/");
+                        }
                         req.Headers.Range = new RangeHeaderValue(offset, end);
 
                         using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);

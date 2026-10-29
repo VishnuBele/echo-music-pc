@@ -27,8 +27,15 @@ public static class Program
             return RunHeadlessSelfTestAsync().GetAwaiter().GetResult();
         }
 
+        int suggestionsIdx = Array.FindIndex(args, a => a.Equals("--visual-suggestions", StringComparison.OrdinalIgnoreCase));
         int smokeIdx = Array.FindIndex(args, a => a.Equals("--visual-smoke", StringComparison.OrdinalIgnoreCase));
-        if (smokeIdx >= 0)
+        if (suggestionsIdx >= 0)
+        {
+            App.VisualSmokeMode = true;
+            App.VisualSuggestionsOnly = true;
+            App.VisualSmokeOutDir = suggestionsIdx + 1 < args.Length ? args[suggestionsIdx + 1] : "/opt/build/screenshots";
+        }
+        else if (smokeIdx >= 0)
         {
             App.VisualSmokeMode = true;
             App.VisualSmokeOutDir = smokeIdx + 1 < args.Length ? args[smokeIdx + 1] : "/opt/build/screenshots";
@@ -52,7 +59,7 @@ public static class Program
 
     private static async Task<int> RunHeadlessSelfTestAsync()
     {
-        Console.WriteLine("=== Echo Music v2.0.1 Native Engine End-to-End Self-Test ===");
+        Console.WriteLine("=== Echo Music v2.0.2 Native Engine End-to-End Self-Test ===");
 
         // [0/8] Verify C1-continuous SmoothLimit has ZERO step discontinuity across [-1.5, +1.5]
         float maxStep = 0f;
@@ -157,6 +164,20 @@ public static class Program
             engine.CopySpectrum32(spec);
             Console.WriteLine($"[7/10] AudioEngine live 'Kill Chori' @ 100% vol: IsPlaying={engine.IsPlaying}, Pos={engine.PositionSeconds:0.00}s, SpecMax={spec.Max():0.000}, Err='{engine.LastError}'");
             if (!engine.IsPlaying || engine.PositionSeconds < 1.2 || spec.Max() <= 0.01f) return 6;
+
+            engine.Seek(60.0);
+            await Task.Delay(700);
+            double forwardSeekPosition = engine.PositionSeconds;
+            bool forwardSeekRecovered = forwardSeekPosition is > 60.0 and < 63.0;
+            Console.WriteLine($"[seek-forward] target=60.0s, current={forwardSeekPosition:0.00}s, recovered={forwardSeekRecovered}");
+            if (!forwardSeekRecovered) return 15;
+
+            engine.Seek(15.0);
+            await Task.Delay(700);
+            double backwardSeekPosition = engine.PositionSeconds;
+            bool backwardSeekRecovered = backwardSeekPosition is > 15.0 and < 18.0;
+            Console.WriteLine($"[seek-backward] target=15.0s, current={backwardSeekPosition:0.00}s, recovered={backwardSeekRecovered}");
+            if (!backwardSeekRecovered) return 16;
         }
 
         var search2 = await yt.SearchAsync("Blinding Lights The Weeknd", "songs");

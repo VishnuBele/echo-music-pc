@@ -314,6 +314,9 @@ internal sealed class DeckState : IDisposable
 
     private readonly float[] _ring = new float[RingCapacityFloats];
     private readonly object _ringLock = new();
+    // Decoder providers (notably WebM/Opus) are not seek-safe while Read is in progress.
+    // Serialize the background decode read with the seek operation.
+    private readonly object _providerLock = new();
     private readonly CancellationTokenSource _pumpCts = new();
     private int _readPos;
     private int _writePos;
@@ -322,6 +325,8 @@ internal sealed class DeckState : IDisposable
     private double _seekBaseSec;
     private volatile bool _sourceEof;
     private int _seekGeneration;
+    private bool _pendingSeek;
+    private double _pendingSeekSeconds;
 
     public TrackItem Track { get; }
     public ResolvedStream? StreamInfo { get; }
@@ -371,11 +376,50 @@ internal sealed class DeckState : IDisposable
         while (!ct.IsCancellationRequested)
         {
             int free;
-            int genBefore;
+            long generation;
+            double? seekRequest = null;
             lock (_ringLock)
             {
                 free = RingCapacityFloats - _availableFloats;
-                genBefore = _seekGeneration;
+                generation = _seekGeneration;
+                if (_pendingSeek)
+                {
+                    seekRequest = _pendingSeekSeconds;
+                    _pendingSeek = false;
+                }
+            }
+
+            if (seekRequest is double seekSeconds)
+            {
+                try
+                {
+                    // Seeking a range-backed WebM may need network I/O. It is intentionally run only
+                    // by this worker, never while holding up the UI thread handling the user's seek.
+                    lock (_providerLock)
+                    {
+                        bool stillCurrent;
+                        lock (_ringLock) stillCurrent = generation == _seekGeneration;
+                        if (stillCurrent)
+                        {
+                            if (_webm is not null) _webm.Seek(seekSeconds);
+                            else if (_naudioFile is not null)
+                                _naudioFile.CurrentTime = TimeSpan.FromSeconds(Math.Clamp(seekSeconds, 0, _naudioFile.TotalTime.TotalSeconds));
+                        }
+                    }
+                }
+                catch
+                {
+                    lock (_ringLock)
+                    {
+                        if (generation == _seekGeneration) _sourceEof = true;
+                    }
+                }
+
+                lock (_ringLock)
+                {
+                    if (generation != _seekGeneration) continue; // a newer scrub target superseded this one
+                    free = RingCapacityFloats - _availableFloats;
+                }
             }
 
             if (_sourceEof || free < scratch.Length)
@@ -387,7 +431,8 @@ internal sealed class DeckState : IDisposable
             int n = 0;
             try
             {
-                n = _provider.Read(scratch, 0, scratch.Length);
+                lock (_providerLock)
+                    n = _provider.Read(scratch, 0, scratch.Length);
             }
             catch
             {
@@ -396,8 +441,8 @@ internal sealed class DeckState : IDisposable
 
             lock (_ringLock)
             {
-                if (genBefore != _seekGeneration)
-                    continue; // discard stale chunk across a user seek
+                if (generation != _seekGeneration)
+                    continue; // discard stale audio after a seek that arrived during the read
                 if (n <= 0)
                 {
                     _sourceEof = true;
@@ -464,14 +509,9 @@ internal sealed class DeckState : IDisposable
             _playedFrames = 0;
             _seekBaseSec = clamped;
             _sourceEof = false;
+            _pendingSeekSeconds = clamped;
+            _pendingSeek = true;
         }
-        try
-        {
-            if (_webm is not null) _webm.Seek(clamped);
-            else if (_naudioFile is not null)
-                _naudioFile.CurrentTime = TimeSpan.FromSeconds(Math.Clamp(clamped, 0, _naudioFile.TotalTime.TotalSeconds));
-        }
-        catch { }
     }
 
     /// <summary>
@@ -602,6 +642,7 @@ public sealed class EchoMasterMixer : ISampleProvider
     private readonly float[][] _apR = AllpassLengths.Select(n => new float[n]).ToArray();
     private readonly int[] _apIdxL = new int[2];
     private readonly int[] _apIdxR = new int[2];
+    private bool _reverbWasActive;
 
     // Variable speed fractional resampler state (Vinyl mode)
     private float[] _speedSrcBuf = new float[16384];
@@ -710,6 +751,27 @@ public sealed class EchoMasterMixer : ISampleProvider
         }
     }
 
+    public void ResetReverbState()
+    {
+        lock (_dspLock)
+        {
+            ClearReverbStateLocked();
+            _reverbWasActive = false;
+        }
+    }
+
+    private void ClearReverbStateLocked()
+    {
+        foreach (var line in _combL) Array.Clear(line);
+        foreach (var line in _combR) Array.Clear(line);
+        foreach (var line in _apL) Array.Clear(line);
+        foreach (var line in _apR) Array.Clear(line);
+        Array.Clear(_combIdxL);
+        Array.Clear(_combIdxR);
+        Array.Clear(_apIdxL);
+        Array.Clear(_apIdxR);
+    }
+
     public int Read(float[] buffer, int offset, int count)
     {
         try
@@ -773,6 +835,17 @@ public sealed class EchoMasterMixer : ISampleProvider
 
         lock (_dspLock)
         {
+            if (doReverb)
+            {
+                _reverbWasActive = true;
+            }
+            else if (_reverbWasActive)
+            {
+                // Do not resume an old delay tail when wet is turned back on later.
+                ClearReverbStateLocked();
+                _reverbWasActive = false;
+            }
+
             bool runEq = _eqActive;
             for (int i = 0; i < producedSamples; i += 2)
             {
@@ -1135,6 +1208,10 @@ public sealed class AudioEngine : IDisposable
     private string? _prewarmedNextId;
     private string? _lightPrewarmNextId;
     private bool _crossfadeTriggeredForTrack;
+    private DeckState? _historyDeck;
+    private PlayHistoryEntry? _historyEntry;
+    private long _historyLastPersistedMs;
+    private bool _playlistHistoryRecordedForQueue;
 
     // SponsorBlock per-track state
     private List<SkipSegment> _activeSkipSegments = new();
@@ -1147,6 +1224,7 @@ public sealed class AudioEngine : IDisposable
     private bool _sleepEndOfTrack;
 
     public List<TrackItem> Queue { get; } = new();
+    public PlaybackCollectionContext? QueueSource { get; private set; }
     public int CurrentIndex { get; private set; } = -1;
     public TrackItem? CurrentTrack => CurrentIndex >= 0 && CurrentIndex < Queue.Count ? Queue[CurrentIndex] : null;
     public ResolvedStream? CurrentStreamInfo => _mixer.PrimaryDeck?.StreamInfo;
@@ -1187,6 +1265,15 @@ public sealed class AudioEngine : IDisposable
         ApplySettingsFromStore();
         _mixer.PrimaryTrackEnded += OnPrimaryTrackEnded;
         StateChanged += PushExternalPresenceDebounced;
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                _audioEndpointWatcher = new WindowsAudioEndpointWatcher();
+                _audioEndpointWatcher.OutputEndpointsChanged += ScheduleAudioEndpointRefresh;
+            }
+            catch { }
+        }
         InitializeOutputBackend();
     }
 
@@ -1217,7 +1304,11 @@ public sealed class AudioEngine : IDisposable
     }
 
     private readonly object _deviceLock = new();
+    private readonly object _deviceChangeDebounceLock = new();
+    private readonly SemaphoreSlim _outputFlushGate = new(1, 1);
     private DateTimeOffset _lastDeviceHealAttempt = DateTimeOffset.MinValue;
+    private WindowsAudioEndpointWatcher? _audioEndpointWatcher;
+    private CancellationTokenSource? _deviceChangeDebounce;
 
     private void InitializeOutputBackend()
     {
@@ -1254,6 +1345,42 @@ public sealed class AudioEngine : IDisposable
     {
         if (OperatingSystem.IsWindows())
             TryStartWindowsOutputDevice();
+    }
+
+    private void ScheduleAudioEndpointRefresh()
+    {
+        CancellationTokenSource debounce;
+        lock (_deviceChangeDebounceLock)
+        {
+            _deviceChangeDebounce?.Cancel();
+            _deviceChangeDebounce?.Dispose();
+            _deviceChangeDebounce = debounce = new CancellationTokenSource();
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(450, debounce.Token).ConfigureAwait(false);
+                if (debounce.IsCancellationRequested) return;
+
+                if (_store.Settings.FollowWindowsDefaultAudioDevice)
+                {
+                    _store.Settings.AudioDeviceId = -1;
+                    _store.SaveDebounced();
+                }
+                else if (!_store.Settings.AudioDeviceId.Equals(-1)
+                    && !Win32WaveOut16Player.EnumerateDevices().Any(d => d.Id == _store.Settings.AudioDeviceId))
+                {
+                    // A manually selected endpoint disappeared. Rejoin the system default automatically.
+                    _store.Settings.AudioDeviceId = -1;
+                    _store.Settings.FollowWindowsDefaultAudioDevice = true;
+                    _store.SaveDebounced();
+                }
+                RestartAudioOutputBackend();
+            }
+            catch (OperationCanceledException) { }
+            catch { }
+        });
     }
 
     private void TryStartWindowsOutputDevice()
@@ -1361,7 +1488,9 @@ public sealed class AudioEngine : IDisposable
 
         // Gapless pre-warm & Crossfade check
         var deck = _mixer.PrimaryDeck;
-        if (deck is null || _mixer.IsPaused) return;
+        if (deck is null) return;
+        RecordCurrentHistoryIfAny(forceUpdate: false);
+        if (_mixer.IsPaused) return;
         double dur = deck.DurationSeconds;
         double pos = deck.PositionSeconds;
 
@@ -1413,7 +1542,7 @@ public sealed class AudioEngine : IDisposable
                         _prewarmedNextTask = Task.Run(() => BuildDeckAsync(nextTrack, CancellationToken.None));
                     }
                 }
-                else if (!_store.Settings.ResourceSaverMode && _lightPrewarmNextId != nextTrack.Id)
+                else if (!ResourceSaverState.IsActive && _lightPrewarmNextId != nextTrack.Id)
                 {
                     _lightPrewarmNextId = nextTrack.Id;
                     _ = Task.Run(async () =>
@@ -1446,11 +1575,19 @@ public sealed class AudioEngine : IDisposable
 
     // --------------------------------------------------------- Queue & Playback Controls
 
-    public async Task PlayQueueAsync(IEnumerable<TrackItem> tracks, int startIndex = 0, bool autoRadioIfSingle = true)
+    public async Task PlayQueueAsync(
+        IEnumerable<TrackItem> tracks,
+        int startIndex = 0,
+        bool autoRadioIfSingle = true,
+        PlaybackCollectionContext? collectionContext = null)
     {
         var list = tracks.Select(t => t.Clone()).ToList();
         if (list.Count == 0) return;
 
+        // Save the outgoing session before changing the collection metadata.
+        RecordCurrentHistoryIfAny();
+        QueueSource = collectionContext;
+        _playlistHistoryRecordedForQueue = false;
         Queue.Clear();
         Queue.AddRange(list);
         CurrentIndex = Math.Clamp(startIndex, 0, Queue.Count - 1);
@@ -1465,6 +1602,8 @@ public sealed class AudioEngine : IDisposable
         }
 
         await LoadCurrentTrackAsync();
+        if (collectionContext is not null && QueueSource == collectionContext && IsPlaying)
+            RecordQueueSourceIfPending();
 
         // If user clicked a single song, populate intelligent Echo Brain + Radio continuation in background!
         if (autoRadioIfSingle && Queue.Count == 1 && !Queue[0].IsLocal && _store.Settings.AutoplayEchoBrain)
@@ -1599,6 +1738,16 @@ public sealed class AudioEngine : IDisposable
         StateChanged?.Invoke();
     }
 
+    private void FlushQueuedOutputDeferred()
+    {
+        _ = Task.Run(() =>
+        {
+            if (!_outputFlushGate.Wait(0)) return; // coalesce rapid scrubbing; one reset is enough
+            try { FlushQueuedOutput(); }
+            finally { _outputFlushGate.Release(); }
+        });
+    }
+
     private void FlushQueuedOutput()
     {
         try { _win32WaveOut?.FlushQueuedAudio(); } catch { }
@@ -1615,6 +1764,7 @@ public sealed class AudioEngine : IDisposable
 
     public void Pause()
     {
+        RecordCurrentHistoryIfAny();
         _mixer.IsPaused = true;
         FlushQueuedOutput();
         StateChanged?.Invoke();
@@ -1631,6 +1781,7 @@ public sealed class AudioEngine : IDisposable
 
     public void Stop()
     {
+        RecordCurrentHistoryIfAny();
         DeckState? old;
         DeckState? fading;
         lock (_loadStateLock)
@@ -1645,6 +1796,7 @@ public sealed class AudioEngine : IDisposable
             _mixer.CrossfadeOutDeck = null;
         }
         FlushQueuedOutput();
+        _mixer.ResetReverbState();
         old?.Dispose();
         fading?.Dispose();
         StateChanged?.Invoke();
@@ -1653,8 +1805,13 @@ public sealed class AudioEngine : IDisposable
     public void Seek(double seconds)
     {
         if (IsLoading) return;
-        _mixer.PrimaryDeck?.Seek(seconds);
+        var deck = _mixer.PrimaryDeck;
+        if (deck is null) return;
+        deck.Seek(seconds);
         _mixer.ResetSpeedBuffer();
+        _mixer.ResetReverbState();
+        // Reset hardware buffers off the UI thread; driver stop/reset calls can block while scrubbing.
+        FlushQueuedOutputDeferred();
         StateChanged?.Invoke();
     }
 
@@ -1907,6 +2064,7 @@ public sealed class AudioEngine : IDisposable
         outgoing?.Dispose();
         fading?.Dispose();
         _mixer.ResetSpeedBuffer();
+        _mixer.ResetReverbState();
         _crossfadeTriggeredForTrack = false;
         _activeSkipSegments = new();
         _triggeredSkipIndices.Clear();
@@ -2055,14 +2213,39 @@ public sealed class AudioEngine : IDisposable
         throw new InvalidOperationException($"Unsupported container: {resolved.MimeType}");
     }
 
-    private void RecordCurrentHistoryIfAny()
+    private void RecordCurrentHistoryIfAny(bool forceUpdate = true)
     {
         var deck = _mixer.PrimaryDeck;
         if (deck is null) return;
+        if (!ReferenceEquals(_historyDeck, deck))
+        {
+            _historyDeck = deck;
+            _historyEntry = null;
+            _historyLastPersistedMs = 0;
+        }
+
         long ms = (long)(deck.PositionSeconds * 1000);
         if (ms < 4000) return; // ignore micro-clicks
         bool skipped = deck.DurationSeconds > 20 && deck.PositionSeconds < Math.Min(25, deck.DurationSeconds * 0.25);
-        _store.RecordPlay(deck.Track, ms, skipped);
+        if (_historyEntry is null)
+        {
+            // Record the source playlist only once per playback queue, after audible playback begins.
+            RecordQueueSourceIfPending();
+            _historyEntry = _store.RecordPlay(deck.Track, ms, skipped);
+            _historyLastPersistedMs = ms;
+            return;
+        }
+
+        if (!forceUpdate && ms - _historyLastPersistedMs < 15_000) return;
+        _store.UpdatePlayHistory(_historyEntry, ms, skipped);
+        _historyLastPersistedMs = ms;
+    }
+
+    private void RecordQueueSourceIfPending()
+    {
+        if (_playlistHistoryRecordedForQueue || QueueSource is not { } source) return;
+        _store.RecordCollectionPlay(source);
+        _playlistHistoryRecordedForQueue = true;
     }
 
     private static void ShuffleInPlace<T>(IList<T> list)
@@ -2115,6 +2298,18 @@ public sealed class AudioEngine : IDisposable
         _linuxPumpCts?.Cancel();
         try { _win32WaveOut?.Dispose(); } catch { }
         try { _waveOut?.Stop(); _waveOut?.Dispose(); } catch { }
+        lock (_deviceChangeDebounceLock)
+        {
+            _deviceChangeDebounce?.Cancel();
+            _deviceChangeDebounce?.Dispose();
+            _deviceChangeDebounce = null;
+        }
+        if (_audioEndpointWatcher is not null)
+        {
+            _audioEndpointWatcher.OutputEndpointsChanged -= ScheduleAudioEndpointRefresh;
+            _audioEndpointWatcher.Dispose();
+            _audioEndpointWatcher = null;
+        }
         _smtc.Dispose();
         _discord.Dispose();
         _mixer.PrimaryDeck?.Dispose();

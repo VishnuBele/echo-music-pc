@@ -137,7 +137,7 @@ public partial class MainWindow
             Child = _flowArtImage,
         });
 
-        _flowTitleBlock = new TextBlock { FontSize = 24, FontWeight = FontWeight.ExtraBold, TextAlignment = TextAlignment.Center, MaxWidth = 560, TextTrimming = TextTrimming.CharacterEllipsis };
+        _flowTitleBlock = new TextBlock { FontSize = 24, FontWeight = FontWeight.ExtraBold, TextAlignment = TextAlignment.Center, MaxWidth = 560 };
         _flowArtistBlock = new TextBlock { FontSize = 14.5, Foreground = ResBrush("TextSecondaryBrush"), TextAlignment = TextAlignment.Center };
         stack.Children.Add(_flowTitleBlock);
         stack.Children.Add(_flowArtistBlock);
@@ -278,6 +278,9 @@ public partial class MainWindow
 
     internal void RenderLibraryView(string activeTab)
     {
+        _currentLibraryTab = activeTab;
+        _historyTrackListStack = null;
+        _historyTrackRows.Clear();
         var root = new StackPanel { Spacing = 18 };
         IEnumerable<LocalPlaylist> SortedPlaylists()
         {
@@ -583,30 +586,164 @@ public partial class MainWindow
                 break;
 
             case "history":
-                var recentTracks = _store.History
-                    .GroupBy(h => h.VideoId)
-                    .Select(g =>
-                    {
-                        var f = g.First();
-                        return new TrackItem
-                        {
-                            Id = f.VideoId,
-                            Title = f.Title,
-                            Artists = f.Artists,
-                            Album = f.Album,
-                            Thumbnail = f.Thumbnail,
-                            DurationSeconds = f.DurationSeconds,
-                        };
-                    })
-                    .Take(60)
+                var collectionHistory = _store.History
+                    .Where(h => (h.EntryKind is "playlist" or "album") && !string.IsNullOrWhiteSpace(h.PlaylistId))
+                    .GroupBy(h => $"{h.EntryKind}:{h.PlaylistSource ?? "youtube"}:{h.PlaylistId}", StringComparer.Ordinal)
+                    .Select(group => group.OrderByDescending(h => h.PlayedAt).First())
+                    .OrderByDescending(h => h.PlayedAt)
+                    .Take(16)
                     .ToList();
-                root.Children.Add(recentTracks.Count == 0
-                    ? EmptyHint("Your listening history will build up automatically as you play music.")
-                    : BuildTrackListTable(recentTracks, showIndex: false));
+                if (collectionHistory.Count > 0)
+                {
+                    root.Children.Add(new TextBlock { Text = "Recently played playlists & albums", FontSize = 16, FontWeight = FontWeight.Bold });
+                    var collectionWrap = new WrapPanel { Orientation = Orientation.Horizontal };
+                    foreach (var entry in collectionHistory)
+                    {
+                        var collection = BuildHistoryCollectionCard(entry);
+                        collection.Margin = new Thickness(0, 0, 12, 12);
+                        collectionWrap.Children.Add(collection);
+                    }
+                    root.Children.Add(collectionWrap);
+                }
+
+                var recentTracks = _store.History
+                    .Where(h => h.EntryKind == "track" && !string.IsNullOrWhiteSpace(h.VideoId))
+                    .GroupBy(h => h.VideoId)
+                    .Select(g => g.OrderByDescending(h => h.PlayedAt).First())
+                    .OrderByDescending(h => h.PlayedAt)
+                    .Take(60)
+                    .Select(f => new TrackItem
+                    {
+                        Id = f.VideoId,
+                        Title = f.Title,
+                        Artists = f.Artists ?? new List<ArtistRef>(),
+                        Album = f.Album,
+                        Thumbnail = f.Thumbnail,
+                        LocalFilePath = f.LocalFilePath,
+                        DurationSeconds = f.DurationSeconds,
+                    })
+                    .ToList();
+                if (recentTracks.Count > 0)
+                {
+                    root.Children.Add(new TextBlock { Text = "Recently played songs", FontSize = 16, FontWeight = FontWeight.Bold });
+                    var historyRows = BuildTrackListTable(recentTracks, showIndex: false);
+                    root.Children.Add(historyRows);
+                    _historyTrackListStack = historyRows as StackPanel;
+                    if (_historyTrackListStack is not null)
+                        for (int rowIndex = 0; rowIndex < recentTracks.Count && rowIndex < _historyTrackListStack.Children.Count; rowIndex++)
+                            _historyTrackRows[recentTracks[rowIndex].Id] = _historyTrackListStack.Children[rowIndex];
+                }
+                if (recentTracks.Count == 0 && collectionHistory.Count == 0)
+                    root.Children.Add(EmptyHint("Your listening history will build up automatically as you play music."));
                 break;
         }
 
         SetCenterContent(root);
+    }
+
+    private void UpdateHistoryTrackRowsInPlace()
+    {
+        if (_historyTrackListStack is null)
+        {
+            // The first song turns an empty-history hint into a populated list. There are no existing
+            // artwork rows to flash, so build that first real view once.
+            if (_store.History.Any(h => h.EntryKind == "track" && !string.IsNullOrWhiteSpace(h.VideoId)))
+                RenderLibraryView("history");
+            return;
+        }
+
+        var first = _store.History
+            .Where(h => h.EntryKind == "track" && !string.IsNullOrWhiteSpace(h.VideoId))
+            .GroupBy(h => h.VideoId, StringComparer.Ordinal)
+            .Select(g => g.OrderByDescending(h => h.PlayedAt).First())
+            .OrderByDescending(h => h.PlayedAt)
+            .Select(h => new TrackItem
+            {
+                Id = h.VideoId, Title = h.Title, Artists = h.Artists ?? new List<ArtistRef>(),
+                Album = h.Album, Thumbnail = h.Thumbnail, LocalFilePath = h.LocalFilePath,
+                DurationSeconds = h.DurationSeconds,
+            })
+            .FirstOrDefault();
+        if (first is null) return;
+
+        if (_historyTrackRows.TryGetValue(first.Id, out var existing))
+        {
+            int currentIndex = _historyTrackListStack.Children.IndexOf(existing);
+            if (currentIndex <= 0) return;
+            _historyTrackListStack.Children.RemoveAt(currentIndex);
+            _historyTrackListStack.Children.Insert(0, existing);
+            return;
+        }
+
+        if (BuildTrackListTable(new List<TrackItem> { first }, showIndex: false) is not StackPanel singleRow || singleRow.Children.Count == 0)
+            return;
+        // Avalonia controls may have only one logical parent. Detach the temporary
+        // BuildTrackListTable host before inserting its row into the live history list.
+        var row = singleRow.Children[0];
+        singleRow.Children.RemoveAt(0);
+        _historyTrackListStack.Children.Insert(0, row);
+        _historyTrackRows[first.Id] = row;
+        while (_historyTrackListStack.Children.Count > 60)
+        {
+            var lastRow = _historyTrackListStack.Children[^1];
+            _historyTrackListStack.Children.RemoveAt(_historyTrackListStack.Children.Count - 1);
+            var expiredId = _historyTrackRows.FirstOrDefault(pair => ReferenceEquals(pair.Value, lastRow)).Key;
+            if (!string.IsNullOrEmpty(expiredId)) _historyTrackRows.Remove(expiredId);
+        }
+    }
+
+    private Control BuildHistoryCollectionCard(PlayHistoryEntry entry)
+    {
+        bool album = entry.EntryKind == "album";
+        var card = new Border
+        {
+            Width = 154,
+            Background = ResBrush("BgCardBrush"),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(9),
+            Cursor = new Cursor(StandardCursorType.Hand),
+        };
+        var stack = new StackPanel { Spacing = 7, ClipToBounds = true };
+        var local = entry.PlaylistSource == "local"
+            ? _store.Playlists.FirstOrDefault(p => p.Id == entry.PlaylistId)
+            : null;
+        Control art;
+        if (local is not null)
+            art = BuildLocalPlaylistCover(local, 132);
+        else
+        {
+            var image = new Image { Width = 132, Height = 132, Stretch = Stretch.UniformToFill };
+            LoadImageInto(image, entry.Thumbnail, BuildGeneratedMediaCover(
+                new MediaCardItem { Id = entry.PlaylistId ?? "", Kind = album ? "album" : "playlist", Title = entry.Title }, 132));
+            art = new Border { Width = 132, Height = 132, CornerRadius = new CornerRadius(6), ClipToBounds = true, Child = image };
+        }
+        stack.Children.Add(art);
+        stack.Children.Add(new TextBlock { Text = entry.Title, FontSize = 12.5, FontWeight = FontWeight.Bold, MaxLines = 2, TextWrapping = TextWrapping.Wrap });
+        stack.Children.Add(new TextBlock
+        {
+            Text = DateTimeOffset.FromUnixTimeMilliseconds(Math.Max(0, entry.PlayedAt)).ToLocalTime().ToString("MMM d, h:mm tt"),
+            FontSize = 10.5,
+            Foreground = ResBrush("TextSecondaryBrush"),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        });
+        card.Child = stack;
+        ToolTip.SetTip(card, album ? "Open album" : "Open playlist");
+        card.PointerPressed += async (_, ev) =>
+        {
+            if (!ev.GetCurrentPoint(card).Properties.IsLeftButtonPressed) return;
+            ev.Handled = true;
+            if (entry.PlaylistSource == "local")
+            {
+                if (local is not null) RenderLocalPlaylistDetail(local);
+                else ShowToast("That local playlist was deleted.");
+                return;
+            }
+            if (album)
+                await NavigateToAsync("album:" + entry.PlaylistId, () => LoadAlbumDetailAsync(entry.PlaylistId!));
+            else
+                await NavigateToAsync("playlist:" + entry.PlaylistId, () => LoadPlaylistDetailAsync(entry.PlaylistId!));
+        };
+        return card;
     }
 
     // ========================================================= 3. OFFLINE DOWNLOADS VIEW
@@ -669,7 +806,7 @@ public partial class MainWindow
             g.Children.Add(new Border { Width = 46, Height = 46, CornerRadius = new CornerRadius(10), ClipToBounds = true, Child = img });
 
             var meta = new StackPanel { Margin = new Thickness(12, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 3 };
-            meta.Children.Add(new TextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+            meta.Children.Add(new ScrollingTitleTextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
             meta.Children.Add(new TextBlock
             {
                 Text = string.Join(", ", captured.Artists.Select(a => a.Name)) + (string.IsNullOrEmpty(captured.QualityLabel) ? "" : $"  •  {captured.QualityLabel}"),
@@ -974,7 +1111,7 @@ public partial class MainWindow
                 }
                 header.Children.Add(avatar);
                 var profileMeta = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Spacing = 4 };
-                profileMeta.Children.Add(new TextBlock { Text = profile.Name, FontSize = 22, FontWeight = FontWeight.ExtraBold, TextTrimming = TextTrimming.CharacterEllipsis });
+                profileMeta.Children.Add(new TextBlock { Text = profile.Name, FontSize = 22, FontWeight = FontWeight.ExtraBold });
                 profileMeta.Children.Add(new TextBlock { Text = "PUBLIC SPOTIFY PROFILE", FontSize = 10.5, FontWeight = FontWeight.Bold, Foreground = ResBrush("AccentBrush"), LetterSpacing = 0.8 });
                 Grid.SetColumn(profileMeta, 1);
                 header.Children.Add(profileMeta);
@@ -1036,7 +1173,7 @@ public partial class MainWindow
                         cover.Child = coverImg;
                     }
                     row.Children.Add(cover);
-                    var name = new TextBlock { Text = source.Name, FontSize = 13.5, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(10, 0, 8, 0) };
+                    var name = new TextBlock { Text = source.Name, FontSize = 13.5, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 8, 0) };
                     Grid.SetColumn(name, 1); row.Children.Add(name);
                     var play = new Button { Classes = { "pill" }, Content = "Play", Padding = new Thickness(12, 6), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2) };
                     play.Click += async (_, _) =>
@@ -1705,10 +1842,15 @@ public partial class MainWindow
             var devices = _audio.GetOutputDevices();
             if (devices.Count > 0)
             {
-                var devOpts = devices.Select(d => (d.Id.ToString(), d.Name)).ToArray();
+                var devOpts = new[] { ("-1", "Windows Default · auto-switch") }
+                    .Concat(devices.Select(d => (d.Id.ToString(), d.Name))).ToArray();
                 hwCard.Children.Add(BuildChoiceRow("Output Speaker / Headphone Device", devOpts, s.AudioDeviceId.ToString(), v =>
                 {
-                    if (int.TryParse(v, out int id)) s.AudioDeviceId = id;
+                    if (int.TryParse(v, out int id))
+                    {
+                        s.AudioDeviceId = id;
+                        s.FollowWindowsDefaultAudioDevice = id < 0;
+                    }
                     _store.SaveNow();
                     _audio.RestartAudioOutputBackend();
                     _audio.PlayTestChime();
@@ -1809,6 +1951,23 @@ public partial class MainWindow
         }
         themeCard.Children.Add(iconRows);
 
+        themeCard.Children.Add(BuildChoiceRow("Player slider style", new[]
+        {
+            ("Bar", "Bar"), ("Wavy", "Wavy"), ("Slim", "Slim"), ("Squiggly", "Squiggly"),
+        }, s.PlayerSliderStyle, v =>
+        {
+            s.PlayerSliderStyle = v;
+            ApplyThemeAndTypography();
+            _store.SaveDebounced();
+            RenderSettingsView();
+        }));
+        themeCard.Children.Add(BuildToggleRow("Wavy Play/Pause Button", "Animate a soft 9-petal shape while playing; turn off to use a circle (or the existing scallop style).", s.WavyPlayPauseButton, v =>
+        {
+            s.WavyPlayPauseButton = v;
+            ApplyThemeAndTypography();
+            _store.SaveDebounced();
+        }));
+
         themeCard.Children.Add(BuildToggleRow("10-Second Seek Buttons (-10s / +10s)", "Show quick -10s and +10s skip buttons inside the bottom player bar", s.ShowTenSecSkip, v =>
         {
             s.ShowTenSecSkip = v;
@@ -1824,16 +1983,22 @@ public partial class MainWindow
             RenderSettingsView();
         }));
 
-        root.Children.Add(WrapSettingsCard(themeCard, "appearance theme app icons logo sidebar close mode run on startup startup seek buttons play button typography font"));
+        root.Children.Add(WrapSettingsCard(themeCard, "appearance theme app icons logo sidebar close mode run on startup startup seek buttons play button typography font player slider bar wavy slim squiggly"));
 
         // 2. Audio & Streaming
         var audioCard = new StackPanel { Spacing = 14 };
         audioCard.Children.Add(new TextBlock { Text = "STREAMING QUALITY & PLAYBACK", FontSize = 11, FontWeight = FontWeight.Bold, Foreground = ResBrush("AccentBrush") });
-        audioCard.Children.Add(BuildChoiceRow("Streaming Audio Quality", new[] { ("Best", "Best (160 kbps Opus)"), ("High", "High (128 kbps)"), ("Normal", "Normal"), ("DataSaver", "Data Saver (48 kbps)") }, s.AudioQuality, v =>
+        audioCard.Children.Add(BuildChoiceRow("Streaming Audio Quality", new[] { ("Best", "Best available (highest bitrate)"), ("High", "High (up to 190 kbps)"), ("Normal", "Normal (up to 142 kbps)"), ("DataSaver", "Data Saver (target ≤72 kbps)") }, s.AudioQuality, v =>
         {
             s.AudioQuality = v;
             _store.SaveDebounced();
             RenderSettingsView();
+        }));
+        audioCard.Children.Add(BuildToggleRow("Show bitrate and quality label", "Show or hide the codec/bitrate badge beside the current song in the player bar", s.ShowStreamQualityLabel, v =>
+        {
+            s.ShowStreamQualityLabel = v;
+            UpdateNowPlayingUi();
+            _store.SaveDebounced();
         }));
         audioCard.Children.Add(BuildToggleRow("Loudness Normalization", "Prevent sudden volume jumps between tracks using ReplayGain/YouTube LUFS", s.NormalizeVolume, v =>
         {
@@ -2009,6 +2174,19 @@ public partial class MainWindow
             ("On", "On (keep saver enabled)"),
             ("Off", "Off (manual saver disabled)"),
         }, s.ResourceSaverPolicy ?? "Auto", SetResourceSaverPolicy));
+        sysCard.Children.Add(BuildChoiceRow("Smoothness & resource use", new[]
+        {
+            ("Low", "Low · conserve resources"),
+            ("Auto", "Auto · balanced"),
+            ("High", "High · use available refresh"),
+        }, CurrentPerformanceMode, SetPerformanceMode));
+        sysCard.Children.Add(new TextBlock
+        {
+            Text = "Low limits visual work; Auto uses balanced frame pacing; High follows available display-synchronized frames without a software cap. Faster scrolling is not intended—only smoother motion. Resource Saver still reduces visual work. The display itself sets the maximum refresh.",
+            FontSize = 11.5,
+            Foreground = ResBrush("TextMutedBrush"),
+            TextWrapping = TextWrapping.Wrap,
+        });
 
         sysCard.Children.Add(new TextBlock
         {
@@ -2271,7 +2449,7 @@ public partial class MainWindow
         var row = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,280"), Margin = new Thickness(0, 2, 0, 2) };
         var label = new TextBlock { Text = title, FontSize = 13.5, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
         row.Children.Add(label);
-        var buttonText = new TextBlock { Text = options.FirstOrDefault(x => string.Equals(x.Val, current, StringComparison.OrdinalIgnoreCase)).Label ?? current, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+        var buttonText = new TextBlock { Text = options.FirstOrDefault(x => string.Equals(x.Val, current, StringComparison.OrdinalIgnoreCase)).Label ?? current, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
         var chevron = new PathIcon { Data = Icons.ChevronDown, Width = 13, Height = 13, Foreground = ResBrush("TextSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center };
         var buttonContent = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,Auto"), Children = { buttonText, chevron } };
         Grid.SetColumn(chevron, 1);

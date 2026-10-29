@@ -13,6 +13,7 @@ namespace EchoMusic;
 public sealed partial class App : Application
 {
     public static bool VisualSmokeMode { get; set; }
+    public static bool VisualSuggestionsOnly { get; set; }
     public static string? VisualSmokeOutDir { get; set; }
     public static string[] StartupFileArgs { get; set; } = Array.Empty<string>();
 
@@ -145,6 +146,22 @@ public sealed partial class App : Application
         Directory.CreateDirectory(outDir);
         try
         {
+            if (App.VisualSuggestionsOnly)
+            {
+                await Task.Delay(2500); // allow the home view and search control to finish attaching
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    win.GlobalSearchBox.Focus();
+                    win.GlobalSearchBox.Text = "kill chori";
+                });
+                await Task.Delay(2200);
+                Console.WriteLine($"[visual-suggestions] popupOpen={win.SearchSuggestionsOpen}, rows={win.SearchSuggestionsCount}");
+                await SaveWindowRenderAsync(win, Path.Combine(outDir, "search-suggestions.png"));
+                await Task.Delay(180);
+                desktop.Shutdown();
+                return;
+            }
+
             // 1. Default Spotify Green Home + Live Now Playing Right Panel
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -170,7 +187,16 @@ public sealed partial class App : Application
             await Task.Delay(900);
             await SaveWindowRenderAsync(win, Path.Combine(outDir, "01c_home_mood_genres.png"));
 
-            // 2. Search 'kill chori' - verify Top Result card + Top matches + Music Videos parity with OG Echo APK!
+            // 2. Search suggestions: confirm the popup stays centered beneath the search field.
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                win.GlobalSearchBox.Focus();
+                win.GlobalSearchBox.Text = "kill";
+            });
+            await Task.Delay(900);
+            await SaveWindowRenderAsync(win, Path.Combine(outDir, "01d_search_suggestions_anchored.png"));
+
+            // 2b. Search 'kill chori' - verify Top Result card + Top matches + Music Videos parity with OG Echo APK!
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
                 win.GlobalSearchBox.Text = "kill chori";

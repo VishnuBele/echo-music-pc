@@ -1,10 +1,10 @@
 # Echo Music for Linux (x86-64)
 
-This is the self-contained Linux x86-64 package of my native C#/Avalonia desktop music player. It includes the .NET runtime, so you do not need a separate .NET installation. Your Linux desktop still needs its normal graphics, font and audio libraries (for example ALSA, PulseAudio or PipeWire).
+This is the native C#/Avalonia Linux x86-64 package. It requires the **.NET 8 Runtime** for Linux x64, plus your desktop's normal graphics, font and audio libraries (for example ALSA, PulseAudio or PipeWire). If .NET 8 is not installed, install the runtime using Microsoft's [.NET Linux installation instructions](https://learn.microsoft.com/dotnet/core/install/linux).
 
 ## Install
 
-1. Download and extract `EchoMusic-Linux-v2.0.1-x64.tar.gz`.
+1. Download and extract `EchoMusic-Linux-v2.0.2-x64.tar.gz`.
 2. Open a terminal in the extracted folder and run:
 
    ```sh

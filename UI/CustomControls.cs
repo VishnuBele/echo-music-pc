@@ -1,9 +1,178 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
+using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 
 namespace EchoMusic.UI;
+
+
+/// <summary>Single-line title marquee modeled on the Android app's Compose basicMarquee.</summary>
+public sealed class ScrollingTitleTextBlock : UserControl
+{
+    private static readonly List<WeakReference<ScrollingTitleTextBlock>> Live = new();
+    private static bool _resourceSaver;
+    private readonly StackPanel _track = new() { Orientation = Orientation.Horizontal, Spacing = 16 };
+    private readonly TextBlock _first = new() { TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.None };
+    private readonly TextBlock _repeat = new() { TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.None };
+    public static readonly StyledProperty<string?> TextProperty = AvaloniaProperty.Register<ScrollingTitleTextBlock, string?>(nameof(Text));
+    private bool _attached;
+    private double _overflow;
+    private double _cycleDistance;
+    private double _position;
+    public int InitialDelayMilliseconds { get; set; } = 1500;
+    private DateTime _startAtUtc;
+    private DateTime _holdUntilUtc;
+
+    public static event Action? AnimationRequested;
+
+    public string? Text { get => GetValue(TextProperty); set => SetValue(TextProperty, value); }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (_first is null) return;
+        if (change.Property == TextProperty)
+        {
+            _first.Text = Text ?? "";
+            _repeat.Text = Text ?? "";
+            ToolTip.SetTip(this, Text);
+            RecheckOverflow();
+        }
+        else if (change.Property == TemplatedControl.FontSizeProperty || change.Property == TemplatedControl.FontWeightProperty || change.Property == TemplatedControl.ForegroundProperty)
+        {
+            ApplyTextStyle();
+            RecheckOverflow();
+        }
+        else if (change.Property == IsVisibleProperty) RecheckOverflow();
+    }
+
+    public ScrollingTitleTextBlock()
+    {
+        ClipToBounds = true;
+        _repeat.Opacity = 1;
+        _track.Children.Add(_first);
+        _track.Children.Add(_repeat);
+        Content = _track;
+        RenderTransform = new TranslateTransform();
+        AttachedToVisualTree += (_, _) => { _attached = true; RecheckOverflow(); };
+        DetachedFromVisualTree += (_, _) =>
+        {
+            _attached = false;
+            _position = 0;
+            RenderTransform = new TranslateTransform();
+        };
+        SizeChanged += (_, _) => RecheckOverflow();
+        lock (Live) Live.Add(new WeakReference<ScrollingTitleTextBlock>(this));
+    }
+
+    public static void SetPerformanceMode(string mode, bool resourceSaver)
+    {
+        lock (Live)
+        {
+            _resourceSaver = resourceSaver;
+            for (int i = Live.Count - 1; i >= 0; i--)
+            {
+                if (!Live[i].TryGetTarget(out var title)) { Live.RemoveAt(i); continue; }
+                title.RecheckOverflow();
+            }
+        }
+    }
+
+    public static bool HasActiveMarquees
+    {
+        get
+        {
+            lock (Live)
+                return Live.Any(w => w.TryGetTarget(out var title) && title.IsMarqueeActive);
+        }
+    }
+
+    public static void AdvanceMarquees(double elapsedSeconds, DateTime nowUtc)
+    {
+        lock (Live)
+        {
+            for (int i = Live.Count - 1; i >= 0; i--)
+            {
+                if (!Live[i].TryGetTarget(out var title)) { Live.RemoveAt(i); continue; }
+                title.AdvanceMarquee(elapsedSeconds, nowUtc);
+            }
+        }
+    }
+
+    private bool IsMarqueeActive => _attached && IsVisible && !_resourceSaver && _overflow > 6 && _cycleDistance > 1;
+
+    private void ApplyTextStyle()
+    {
+        _first.FontSize = _repeat.FontSize = FontSize;
+        _first.FontWeight = _repeat.FontWeight = FontWeight;
+        _first.Foreground = _repeat.Foreground = Foreground;
+    }
+
+    private void RecheckOverflow()
+    {
+        ToolTip.SetTip(this, Text);
+        if (!_attached || !IsVisible || string.IsNullOrWhiteSpace(Text) || Bounds.Width <= 1)
+        {
+            _overflow = 0;
+            _cycleDistance = 0;
+            _repeat.IsVisible = false;
+            _position = 0;
+            _track.RenderTransform = new TranslateTransform();
+            return;
+        }
+
+        string title = Text ?? "";
+        double sourceWidth = MeasureText(title);
+        _overflow = Math.Max(0, sourceWidth - Bounds.Width - 2);
+        if (_overflow <= 6 || _resourceSaver)
+        {
+            _overflow = 0;
+            _cycleDistance = 0;
+            _repeat.IsVisible = false;
+            _position = 0;
+            _track.RenderTransform = new TranslateTransform();
+            return;
+        }
+
+        const string separator = "   ·   ";
+        _cycleDistance = MeasureText(title + separator);
+        _repeat.IsVisible = true;
+        _position = 0;
+        _startAtUtc = DateTime.UtcNow.AddMilliseconds(Math.Clamp(InitialDelayMilliseconds, 0, 10_000));
+        _holdUntilUtc = DateTime.MinValue;
+        AnimationRequested?.Invoke();
+    }
+
+    private double MeasureText(string value)
+    {
+        var probe = new TextBlock
+        {
+            Text = value,
+            FontSize = FontSize,
+            FontWeight = FontWeight,
+            FontFamily = _first.FontFamily,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.None,
+        };
+        probe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        return probe.DesiredSize.Width;
+    }
+
+    private void AdvanceMarquee(double elapsedSeconds, DateTime nowUtc)
+    {
+        if (!IsMarqueeActive || nowUtc < _startAtUtc || nowUtc < _holdUntilUtc) return;
+        _position += 30.0 * Math.Clamp(elapsedSeconds, 0, 0.05); // mobile player marquee velocity
+        if (_position >= _cycleDistance)
+        {
+            _position %= _cycleDistance; // repeated title makes the wrap seamless
+            _holdUntilUtc = nowUtc.AddMilliseconds(450);
+        }
+        _track.RenderTransform = new TranslateTransform(-_position, 0);
+    }
+}
 
 /// <summary>
 /// Renders the exact gradient-circle + audio-waveform vector logo:
@@ -57,6 +226,9 @@ public sealed class SeekProgressControl : Control
     public static readonly StyledProperty<double> MaximumProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(Maximum), 100);
     public static readonly StyledProperty<double> ValueProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(Value), 0);
     public static readonly StyledProperty<double> HandleScaleProperty = AvaloniaProperty.Register<SeekProgressControl, double>(nameof(HandleScale), 0);
+    public static readonly StyledProperty<string> SliderStyleProperty = AvaloniaProperty.Register<SeekProgressControl, string>(nameof(SliderStyle), "Slim");
+    public static readonly StyledProperty<bool> IsPlayingProperty = AvaloniaProperty.Register<SeekProgressControl, bool>(nameof(IsPlaying), false);
+    public static readonly StyledProperty<bool> IsBufferingProperty = AvaloniaProperty.Register<SeekProgressControl, bool>(nameof(IsBuffering), false);
     public static readonly StyledProperty<IBrush?> TrackBrushProperty = AvaloniaProperty.Register<SeekProgressControl, IBrush?>(nameof(TrackBrush));
     public static readonly StyledProperty<IBrush?> ProgressBrushProperty = AvaloniaProperty.Register<SeekProgressControl, IBrush?>(nameof(ProgressBrush));
     public static readonly StyledProperty<IBrush?> HandleBrushProperty = AvaloniaProperty.Register<SeekProgressControl, IBrush?>(nameof(HandleBrush));
@@ -68,6 +240,10 @@ public sealed class SeekProgressControl : Control
     public double Maximum { get => GetValue(MaximumProperty); set => SetValue(MaximumProperty, value); }
     public double Value { get => GetValue(ValueProperty); set => SetValue(ValueProperty, value); }
     public double HandleScale { get => GetValue(HandleScaleProperty); set => SetValue(HandleScaleProperty, value); }
+    public event EventHandler? SeekCommitted;
+    public string SliderStyle { get => GetValue(SliderStyleProperty); set => SetValue(SliderStyleProperty, value); }
+    public bool IsPlaying { get => GetValue(IsPlayingProperty); set => SetValue(IsPlayingProperty, value); }
+    public bool IsBuffering { get => GetValue(IsBufferingProperty); set => SetValue(IsBufferingProperty, value); }
     public IBrush? TrackBrush { get => GetValue(TrackBrushProperty); set => SetValue(TrackBrushProperty, value); }
     public IBrush? ProgressBrush { get => GetValue(ProgressBrushProperty); set => SetValue(ProgressBrushProperty, value); }
     public IBrush? HandleBrush { get => GetValue(HandleBrushProperty); set => SetValue(HandleBrushProperty, value); }
@@ -93,7 +269,7 @@ public sealed class SeekProgressControl : Control
         base.OnPropertyChanged(change);
         if (change.Property == ValueProperty || change.Property == MinimumProperty || change.Property == MaximumProperty ||
             change.Property == TrackBrushProperty || change.Property == ProgressBrushProperty || change.Property == HandleBrushProperty ||
-            change.Property == HandleScaleProperty)
+            change.Property == HandleScaleProperty || change.Property == SliderStyleProperty || change.Property == IsPlayingProperty || change.Property == IsBufferingProperty)
             InvalidateVisual();
     }
 
@@ -107,7 +283,9 @@ public sealed class SeekProgressControl : Control
         const double sideInset = 6;
         double trackWidth = Math.Max(0, width - sideInset * 2);
         double centerY = height / 2;
-        double trackHeight = (_pointerOver || _dragging) ? 4.0 : 3.0;
+        string style = SliderStyle is "Bar" or "Wavy" or "Slim" or "Squiggly" ? SliderStyle : "Slim";
+        double trackHeight = style == "Bar" ? ((_pointerOver || _dragging) ? 7.0 : 5.5)
+            : ((_pointerOver || _dragging) ? 4.0 : 3.0);
         double range = Math.Max(0.0001, Maximum - Minimum);
         double ratio = Math.Clamp((Value - Minimum) / range, 0, 1);
         double progressWidth = trackWidth * ratio;
@@ -115,17 +293,84 @@ public sealed class SeekProgressControl : Control
         var progressBrush = ProgressBrush ?? Brushes.White;
         var handleBrush = HandleBrush ?? progressBrush;
 
-        context.DrawRectangle(trackBrush, null,
-            new Rect(sideInset, centerY - trackHeight / 2, trackWidth, trackHeight), trackHeight / 2, trackHeight / 2);
-        if (progressWidth > 0.01)
-            context.DrawRectangle(progressBrush, null,
-                new Rect(sideInset, centerY - trackHeight / 2, progressWidth, trackHeight), trackHeight / 2, trackHeight / 2);
+        StreamGeometry? waveGeometry = null;
+        double waveAmplitude = 0;
+        double waveLength = 0;
+        if (style is "Wavy" or "Squiggly")
+        {
+            double amplitude = style == "Squiggly" ? Math.Min(4.3, height * 0.24) : Math.Min(2.4, height * 0.14);
+            double wavelength = style == "Squiggly" ? 28.0 : 52.0;
+            waveAmplitude = amplitude;
+            waveLength = wavelength;
+            double phase = IsPlaying ? DateTime.UtcNow.TimeOfDay.TotalSeconds * 2.7 : 0;
+            int steps = Math.Max(32, (int)Math.Ceiling(trackWidth / 2));
+            var wave = new StreamGeometry();
+            waveGeometry = wave;
+            using (var path = wave.Open())
+            {
+                for (int i = 0; i <= steps; i++)
+                {
+                    double x = sideInset + trackWidth * i / steps;
+                    double y = centerY + amplitude * Math.Sin((x / wavelength) * Math.PI * 2 - phase);
+                    var point = new Point(x, y);
+                    if (i == 0) path.BeginFigure(point, false);
+                    else path.LineTo(point);
+                }
+                path.EndFigure(false);
+            }
+            var penWidth = style == "Squiggly" ? 3.6 : 3.2;
+            using (context.PushClip(new Rect(sideInset, 0, trackWidth, height)))
+            {
+                context.DrawGeometry(null, new Pen(trackBrush, penWidth, lineCap: PenLineCap.Round), wave);
+                if (progressWidth > 0.01)
+                {
+                    using (context.PushClip(new Rect(sideInset, 0, progressWidth, height)))
+                        context.DrawGeometry(null, new Pen(progressBrush, penWidth, lineCap: PenLineCap.Round), wave);
+                }
+            }
+        }
+        else
+        {
+            context.DrawRectangle(trackBrush, null,
+                new Rect(sideInset, centerY - trackHeight / 2, trackWidth, trackHeight), trackHeight / 2, trackHeight / 2);
+            if (progressWidth > 0.01)
+                context.DrawRectangle(progressBrush, null,
+                    new Rect(sideInset, centerY - trackHeight / 2, progressWidth, trackHeight), trackHeight / 2, trackHeight / 2);
+        }
+
+        if (IsBuffering)
+        {
+            double segmentWidth = Math.Clamp(trackWidth * 0.20, 18, 46);
+            double travel = trackWidth + segmentWidth;
+            double phase = (DateTime.UtcNow.TimeOfDay.TotalSeconds * 86.0) % travel;
+            double segmentX = sideInset + phase - segmentWidth;
+            using (context.PushClip(new Rect(sideInset, 0, trackWidth, height)))
+            using (context.PushClip(new Rect(segmentX, 0, segmentWidth, height)))
+            {
+                if (waveGeometry is not null)
+                {
+                    double lineWidth = style == "Squiggly" ? 3.6 : 3.2;
+                    context.DrawGeometry(null, new Pen(progressBrush, lineWidth + 0.8, lineCap: PenLineCap.Round), waveGeometry);
+                }
+                else
+                {
+                    double loadingHeight = style == "Bar" ? trackHeight : Math.Max(3.2, trackHeight);
+                    context.DrawRectangle(progressBrush, null,
+                        new Rect(segmentX, centerY - loadingHeight / 2, segmentWidth, loadingHeight),
+                        loadingHeight / 2, loadingHeight / 2);
+                }
+            }
+        }
 
         if (HandleScale > 0.005)
         {
-            double radius = 5.5 * Math.Clamp(HandleScale, 0, 1);
+            double radius = style == "Bar" ? 5.2 * Math.Clamp(HandleScale, 0, 1) : 5.5 * Math.Clamp(HandleScale, 0, 1);
             double headX = sideInset + progressWidth;
-            context.DrawEllipse(handleBrush, null, new Point(headX, centerY), radius, radius);
+            double headY = style is "Wavy" or "Squiggly"
+                ? centerY + waveAmplitude
+                    * Math.Sin((headX / waveLength) * Math.PI * 2 - (IsPlaying ? DateTime.UtcNow.TimeOfDay.TotalSeconds * 2.7 : 0))
+                : centerY;
+            context.DrawEllipse(handleBrush, null, new Point(headX, headY), radius, radius);
         }
     }
 
@@ -177,6 +422,7 @@ public sealed class SeekProgressControl : Control
         e.Pointer.Capture(null);
         e.Handled = true;
         InvalidateVisual();
+        SeekCommitted?.Invoke(this, EventArgs.Empty);
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -189,6 +435,7 @@ public sealed class SeekProgressControl : Control
         else if (e.Key == Key.End) Value = Maximum;
         else return;
         e.Handled = true;
+        SeekCommitted?.Invoke(this, EventArgs.Empty);
     }
 
     private void SetValueFromPointer(Point position)
@@ -206,6 +453,7 @@ public sealed class SpectrumVisualizerControl : Control
 {
     private readonly float[] _bars = new float[32];
     private DateTime _lastUpdateUtc;
+    public bool IsSettled => _bars.All(value => value <= 0.015f);
     public int BarCount { get; set; } = 12;
     public Color BarColor { get; set; } = Color.Parse("#1ED760");
 
@@ -256,11 +504,44 @@ public sealed class SpectrumVisualizerControl : Control
 /// </summary>
 public sealed class ScallopBadgeControl : Control
 {
+    private double _wavyProgress;
+    private double _wavyStartProgress;
+    private double _wavyTargetProgress;
+    private DateTime _wavyTransitionStartedUtc;
+    private bool _wavyTargetInitialized;
+
     public bool UseScallopShape { get; set; } = false;
+    public bool UseWavyShape { get; set; } = true;
     public bool IsPlaying { get; set; }
     public bool IsLoading { get; set; }
     public Color FillColor { get; set; } = Colors.White;
     public Color GlyphColor { get; set; } = Colors.Black;
+
+    /// <summary>Updates the petal-to-circle transition and rotation at display-frame cadence.</summary>
+    public bool AdvanceAnimation(DateTime nowUtc)
+    {
+        double target = UseWavyShape && IsPlaying && !IsLoading ? 1.0 : 0.0;
+        if (!_wavyTargetInitialized || Math.Abs(target - _wavyTargetProgress) > 0.001)
+        {
+            _wavyTargetInitialized = true;
+            _wavyStartProgress = _wavyProgress;
+            _wavyTargetProgress = target;
+            _wavyTransitionStartedUtc = nowUtc;
+        }
+
+        bool transitioning = Math.Abs(_wavyProgress - _wavyTargetProgress) > 0.001;
+        if (transitioning)
+        {
+            double t = Math.Clamp((nowUtc - _wavyTransitionStartedUtc).TotalMilliseconds / 280.0, 0, 1);
+            double eased = t * t * (3 - 2 * t);
+            _wavyProgress = _wavyStartProgress + (_wavyTargetProgress - _wavyStartProgress) * eased;
+            if (t >= 1) _wavyProgress = _wavyTargetProgress;
+        }
+
+        bool animating = transitioning || (UseWavyShape && IsPlaying && !IsLoading);
+        if (animating) InvalidateVisual();
+        return animating;
+    }
 
     public override void Render(DrawingContext context)
     {
@@ -272,17 +553,24 @@ public sealed class ScallopBadgeControl : Control
         double rOuter = size * 0.48;
         var brush = new SolidColorBrush(FillColor);
 
-        if (UseScallopShape)
+        double wavyProgress = UseWavyShape ? Math.Clamp(_wavyProgress, 0, 1) : 0;
+        bool animatedWavy = wavyProgress > 0.001;
+        if (animatedWavy || UseScallopShape)
         {
             var geom = new StreamGeometry();
             using (var ctx = geom.Open())
             {
-                const int petals = 12;
-                const int steps = 120;
+                int petals = animatedWavy ? 9 : 12;
+                int steps = 144;
+                double rotation = animatedWavy ? DateTime.UtcNow.TimeOfDay.TotalSeconds * (2.0 * Math.PI / 8.0) * wavyProgress : 0;
+                double indent = animatedWavy ? 0.08 * wavyProgress : 0.095;
+                double baseRadius = animatedWavy ? 1.0 - indent : 0.905;
                 for (int i = 0; i <= steps; i++)
                 {
                     double theta = (2.0 * Math.PI * i) / steps;
-                    double wave = 0.905 + 0.095 * Math.Cos(petals * theta);
+                    double wave = animatedWavy
+                        ? baseRadius + indent * Math.Cos(petals * (theta - rotation))
+                        : baseRadius + indent * Math.Cos(petals * theta);
                     double r = rOuter * wave;
                     var pt = new Point(cx + r * Math.Cos(theta), cy + r * Math.Sin(theta));
                     if (i == 0) ctx.BeginFigure(pt, true);

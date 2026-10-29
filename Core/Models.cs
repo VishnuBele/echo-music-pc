@@ -14,6 +14,15 @@ public sealed class AlbumRef
     public string? Id { get; set; }
 }
 
+public sealed class PlaybackCollectionContext
+{
+    public string Id { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Thumbnail { get; set; } = "";
+    public bool IsLocal { get; set; }
+    public string Kind { get; set; } = "playlist"; // playlist | album
+}
+
 public sealed class TrackItem
 {
     public string Id { get; set; } = "";
@@ -163,6 +172,7 @@ public sealed class ResolvedStream
     public double LoudnessDb { get; set; }
     public string ClientName { get; set; } = "";
     public string UserAgent { get; set; } = "";
+    public string? MediaOrigin { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public string? Title { get; set; }
     public string? Author { get; set; }
@@ -239,11 +249,16 @@ public sealed class ContentExclusion
 
 public sealed class PlayHistoryEntry
 {
+    // Older database entries omit EntryKind and remain track entries by default.
+    public string EntryKind { get; set; } = "track"; // track | playlist | album
     public string VideoId { get; set; } = "";
+    public string? PlaylistId { get; set; }
+    public string? PlaylistSource { get; set; } // local | youtube
     public string Title { get; set; } = "";
     public List<ArtistRef> Artists { get; set; } = new();
     public AlbumRef? Album { get; set; }
     public string Thumbnail { get; set; } = "";
+    public string? LocalFilePath { get; set; }
     public int DurationSeconds { get; set; }
     public long PlayedAt { get; set; }
     public long MsPlayed { get; set; }
@@ -273,12 +288,18 @@ public sealed class AppSettings
     public int UiDesignGeneration { get; set; } = 5;
     public string Theme { get; set; } = "SpotifyGreen"; // SpotifyGreen | EchoDark | EchoLight | AmoledBlack | AppleVelvet | NothingMono | PookiePink | RosePetalBloom | LateNight
     public string PlayerStyle { get; set; } = "Circle"; // Circle (Spotify Desktop) | Scallop (Echo Expressive)
+    public string PlayerSliderStyle { get; set; } = "Slim"; // Bar | Wavy | Slim | Squiggly
+    public bool WavyPlayPauseButton { get; set; } = true;
     public string AppIconStyle { get; set; } = "WaveDefault"; // WaveDefault is the V!SHNU PC emerald waveform
     public string LeftSidebarMode { get; set; } = "Expanded"; // current visual state: Expanded | Compact | Hidden
     public string SidebarCollapseBehavior { get; set; } = "Partial"; // Partial | Stepwise | Hide
     public bool ShowTenSecSkip { get; set; } = false;
+    public int AnimationFrameRate { get; set; } = 60; // legacy migration value; 30 | 60 | 90 | 120
+    public string? PerformanceMode { get; set; } // Low | Auto | High; null migrates legacy AnimationFrameRate
+    public bool ShowStreamQualityLabel { get; set; } = true;
     public string AudioBackend { get; set; } = "Win32WaveOut"; // Win32WaveOut | DirectSound | NAudioWaveOut | WasapiPolling
     public int AudioDeviceId { get; set; } = -1; // -1 = Windows Default Sound Mapper
+    public bool FollowWindowsDefaultAudioDevice { get; set; } = true;
     public string FontChoice { get; set; } = "SpotifyCircular"; // SpotifyCircular | PlusJakarta | Outfit | Inter | System
     public string UiDensity { get; set; } = "Comfortable"; // Comfortable | Compact
     public string AudioQuality { get; set; } = "Best"; // DataSaver | Normal | High | Best

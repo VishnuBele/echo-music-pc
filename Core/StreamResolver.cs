@@ -14,11 +14,12 @@ public sealed class ResolvedStreamResult
 
 public sealed class StreamResolver
 {
-    // Exact upstream YTPlayerUtils cascade: whole-file clients first, preview-only & Piped emergency fallback last
+    // Mirror the Android playback order: full-file clients first, preview-only profiles last.
     private static ClientSpec[] GetCascade() => new[]
     {
         YouTubeClients.VisionOs,
         YouTubeClients.AndroidVr,
+        YouTubeClients.TvHtml5,
         YouTubeClients.AndroidVrLegacy,
         YouTubeClients.IpadOs,
         YouTubeClients.Ios,
@@ -41,18 +42,28 @@ public sealed class StreamResolver
         _qualitySetting = qualitySetting;
     }
 
-    public async Task<ResolvedStreamResult> ResolveVerifiedAsync(
+    public Task<ResolvedStreamResult> ResolveVerifiedAsync(
         string videoId,
         bool preferWebmOpus = true,
         bool forceRefresh = false,
         CancellationToken ct = default)
+        => ResolveVerifiedCoreAsync(videoId, preferWebmOpus, forceRefresh, ct,
+            retryAfterGuestRefresh: true, visitorAlreadyRefreshed: false);
+
+    private async Task<ResolvedStreamResult> ResolveVerifiedCoreAsync(
+        string videoId,
+        bool preferWebmOpus,
+        bool forceRefresh,
+        CancellationToken ct,
+        bool retryAfterGuestRefresh,
+        bool visitorAlreadyRefreshed)
     {
         var cacheKey = $"{videoId}:{(preferWebmOpus ? "opus" : "mp4")}:{_qualitySetting()}";
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(3))
         {
             try
             {
-                var (p0, total) = await BoundedRangeHttpStream.FetchPageStaticAsync(_yt.SharedHttp, cached.Url, cached.UserAgent, 0, cached.ContentLength, ct);
+                var (p0, total) = await BoundedRangeHttpStream.FetchPageStaticAsync(_yt.SharedHttp, cached.Url, cached.UserAgent, 0, cached.ContentLength, ct, cached.MediaOrigin);
                 if (p0.Length > 256)
                 {
                     if (total > cached.ContentLength) cached.ContentLength = total;
@@ -65,15 +76,19 @@ public sealed class StreamResolver
             }
         }
 
-        await _yt.EnsureVisitorDataAsync(forceRefresh, ct);
+        if (!visitorAlreadyRefreshed)
+            await _yt.EnsureVisitorDataAsync(forceRefresh, ct);
 
         Exception? lastErr = null;
+        string? guestChallengeMessage = null;
+        var profileOutcomes = new List<(string Client, string Status, string Reason)>();
         var cascade = GetCascade();
 
         for (int idx = 0; idx < cascade.Length; idx++)
         {
             var client = cascade[idx];
-            bool isPreviewCappedClient = client.Name == "IOS";
+            bool isPreviewCappedClient = client.Name is "IOS" or "IPADOS"
+                || (client.Name == "ANDROID_VR" && client.Version == YouTubeClients.AndroidVrLegacy.Version);
             try
             {
                 var root = await _yt.GetPlayerRawAsync(videoId, client, ct);
@@ -81,7 +96,10 @@ public sealed class StreamResolver
                 if (!string.Equals(status, "OK", StringComparison.OrdinalIgnoreCase))
                 {
                     var reason = root?["playabilityStatus"]?["reason"]?.GetValue<string>() ?? status ?? "UNPLAYABLE";
+                    profileOutcomes.Add((client.Name, status ?? "UNKNOWN", reason));
                     lastErr = new InvalidOperationException($"{client.Name}: {reason}");
+                    if (IsGuestVerificationChallenge(reason))
+                        guestChallengeMessage ??= lastErr.Message;
                     continue;
                 }
 
@@ -107,13 +125,13 @@ public sealed class StreamResolver
                     long verifiedLen;
                     try
                     {
-                        (page0, verifiedLen) = await BoundedRangeHttpStream.FetchPageStaticAsync(_yt.SharedHttp, url, mediaUa, 0, clen, ct);
+                        (page0, verifiedLen) = await BoundedRangeHttpStream.FetchPageStaticAsync(_yt.SharedHttp, url, mediaUa, 0, clen, ct, client.Origin);
                         if (page0.Length < 256) continue;
 
                         // Mirror YTPlayerUtils.validateStatus: for whole-file clients, verify final byte isn't 1MiB-capped
                         if (!isPreviewCappedClient && verifiedLen > 1_200_000)
                         {
-                            bool tailOk = await ProbeTailByteAsync(_yt.SharedHttp, url, mediaUa, verifiedLen, ct);
+                            bool tailOk = await ProbeTailByteAsync(_yt.SharedHttp, url, mediaUa, verifiedLen, ct, client.Origin);
                             if (!tailOk)
                             {
                                 lastErr = new InvalidOperationException($"{client.Name} failed tail-byte probe (preview-capped)");
@@ -148,6 +166,7 @@ public sealed class StreamResolver
                         LoudnessDb = loudness,
                         ClientName = client.Name,
                         UserAgent = mediaUa,
+                        MediaOrigin = client.Origin,
                         ExpiresAt = expires,
                         Title = root?["videoDetails"]?["title"]?.GetValue<string>(),
                         Author = root?["videoDetails"]?["author"]?.GetValue<string>(),
@@ -164,6 +183,8 @@ public sealed class StreamResolver
             catch (Exception ex)
             {
                 lastErr = ex;
+                if (IsGuestVerificationChallenge(ex.Message))
+                    guestChallengeMessage ??= ex.Message;
             }
         }
 
@@ -180,12 +201,12 @@ public sealed class StreamResolver
                 var streams = json?["audioStreams"] as JsonArray;
                 if (streams is null || streams.Count == 0) continue;
 
-                var best = streams
-                    .Select(s => s as JsonObject)
-                    .Where(s => s is not null && !string.IsNullOrEmpty(s["url"]?.GetValue<string>()) &&
-                                ((s["mimeType"]?.GetValue<string>() ?? "").Contains("webm", StringComparison.OrdinalIgnoreCase) || OperatingSystem.IsWindows()))
-                    .OrderByDescending(s => s!["bitrate"]?.GetValue<int>() ?? 0)
-                    .FirstOrDefault();
+                var best = RankCandidateFormats(streams, _qualitySetting(), preferWebmOpus)
+                    .FirstOrDefault(s =>
+                    {
+                        var mime = s["mimeType"]?.GetValue<string>() ?? "";
+                        return mime.Contains("webm", StringComparison.OrdinalIgnoreCase) || OperatingSystem.IsWindows();
+                    });
 
                 if (best is not null)
                 {
@@ -214,13 +235,55 @@ public sealed class StreamResolver
             catch { }
         }
 
+        if (retryAfterGuestRefresh && !_yt.IsSignedIn && guestChallengeMessage is not null)
+        {
+            // Guest visitor IDs can become throttled independently of the app/account. Refresh one
+            // time and rerun the client cascade; never turn a YouTube challenge into a fake Echo
+            // sign-in requirement or loop indefinitely.
+            string? previousVisitor = _yt.CurrentVisitorData;
+            string? refreshedVisitor = await _yt.EnsureVisitorDataAsync(force: true, ct: ct);
+            if (!ct.IsCancellationRequested
+                && !string.IsNullOrWhiteSpace(refreshedVisitor)
+                && !string.Equals(previousVisitor, refreshedVisitor, StringComparison.Ordinal))
+            {
+                return await ResolveVerifiedCoreAsync(videoId, preferWebmOpus, forceRefresh: true, ct: ct,
+                    retryAfterGuestRefresh: false, visitorAlreadyRefreshed: true);
+            }
+        }
+
+        if (!_yt.IsSignedIn && guestChallengeMessage is not null)
+        {
+            throw new InvalidOperationException(
+                "YouTube temporarily blocked anonymous playback for this track. Echo does not require sign-in; please try again later or on another network.",
+                new InvalidOperationException(guestChallengeMessage, lastErr));
+        }
+
+        bool unavailableAcrossProfiles = profileOutcomes.Count == cascade.Length
+            && profileOutcomes.All(x => x.Status.Equals("UNPLAYABLE", StringComparison.OrdinalIgnoreCase)
+                && x.Reason.Contains("video is not available", StringComparison.OrdinalIgnoreCase));
+        if (unavailableAcrossProfiles)
+        {
+            var clients = string.Join(", ", profileOutcomes.Select(x => x.Client).Distinct(StringComparer.OrdinalIgnoreCase));
+            throw new InvalidOperationException(
+                $"YouTube reports this video as unavailable on every guest playback profile tried ({clients}) for the current region/session. This is not a bot-verification challenge; the video may be removed, region/rights restricted, or otherwise unavailable. Changing request headers cannot override that.",
+                lastErr);
+        }
+
         throw lastErr ?? new InvalidOperationException($"Could not resolve playable stream for {videoId}.");
+    }
+
+    private static bool IsGuestVerificationChallenge(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        return message.Contains("sign in to confirm", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("confirm you're not a bot", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("automated queries", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<ResolvedStream> ResolveAsync(string videoId, bool preferWebmOpus = true, bool forceRefresh = false, CancellationToken ct = default)
         => (await ResolveVerifiedAsync(videoId, preferWebmOpus, forceRefresh, ct)).Stream;
 
-    private static async Task<bool> ProbeTailByteAsync(HttpClient http, string url, string ua, long totalLen, CancellationToken ct)
+    private static async Task<bool> ProbeTailByteAsync(HttpClient http, string url, string ua, long totalLen, CancellationToken ct, string? mediaOrigin = null)
     {
         try
         {
@@ -228,6 +291,11 @@ public sealed class StreamResolver
             cts.CancelAfter(TimeSpan.FromSeconds(4));
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("User-Agent", ua);
+            if (!string.IsNullOrWhiteSpace(mediaOrigin))
+            {
+                req.Headers.TryAddWithoutValidation("Origin", mediaOrigin);
+                req.Headers.TryAddWithoutValidation("Referer", mediaOrigin.TrimEnd('/') + "/");
+            }
             req.Headers.Range = new RangeHeaderValue(totalLen - 2, totalLen - 1);
             using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             return res.StatusCode == HttpStatusCode.PartialContent || res.IsSuccessStatusCode;
@@ -243,9 +311,14 @@ public sealed class StreamResolver
         var m = Regex.Match(streamUrl, @"[?&]c=([^&]+)");
         if (!m.Success) return fallbackUa;
         var c = Uri.UnescapeDataString(m.Groups[1].Value).ToUpperInvariant();
+        var versionMatch = Regex.Match(streamUrl, @"[?&]cver=([^&]+)");
+        string version = versionMatch.Success ? Uri.UnescapeDataString(versionMatch.Groups[1].Value) : "";
         return c switch
         {
+            "ANDROID_VR" when version == YouTubeClients.AndroidVrLegacy.Version => YouTubeClients.AndroidVrLegacy.UserAgent,
             "ANDROID_VR" => YouTubeClients.AndroidVr.UserAgent,
+            "TVHTML5" => YouTubeClients.TvHtml5.UserAgent,
+            "IPADOS" => YouTubeClients.IpadOs.UserAgent,
             "IOS" => YouTubeClients.Ios.UserAgent,
             "VISIONOS" => fallbackUa,
             _ => fallbackUa,
@@ -272,15 +345,23 @@ public sealed class StreamResolver
             candidates.Add(f);
         }
 
-        return candidates
-            .OrderByDescending(f =>
+        // Pick the highest-rate playable stream at or below the requested ceiling. If YouTube
+        // does not provide a stream below that ceiling, choose the closest available rate instead
+        // of accidentally jumping to the highest rate in Data Saver mode. Codec efficiency only
+        // breaks equal-bitrate ties; Opus is not inherently a lower-quality format.
+        var withinCeiling = candidates
+            .Where(f => (f["bitrate"]?.GetValue<int>() ?? 0) <= ceiling)
+            .ToList();
+        var pool = withinCeiling.Count > 0 ? withinCeiling : candidates;
+        bool chooseLowest = quality == "DataSaver" && withinCeiling.Count == 0;
+        return pool
+            .OrderBy(f => chooseLowest ? (f["bitrate"]?.GetValue<int>() ?? 0) : -(f["bitrate"]?.GetValue<int>() ?? 0))
+            .ThenByDescending(f =>
             {
                 var m = f["mimeType"]?.GetValue<string>() ?? "";
                 bool isOpus = m.Contains("webm", StringComparison.OrdinalIgnoreCase) && m.Contains("opus", StringComparison.OrdinalIgnoreCase);
                 return preferWebmOpus == isOpus ? 1 : 0;
             })
-            .ThenByDescending(f => (f["bitrate"]?.GetValue<int>() ?? 0) <= ceiling ? 1 : 0)
-            .ThenByDescending(f => f["bitrate"]?.GetValue<int>() ?? 0)
             .ToList();
     }
 }
@@ -295,6 +376,7 @@ public sealed class BoundedRangeHttpStream : Stream
     private readonly HttpClient _http;
     private readonly string _url;
     private readonly string _userAgent;
+    private readonly string? _mediaOrigin;
     private readonly Dictionary<int, byte[]> _pages = new();
     private readonly object _sync = new();
     private long _length;
@@ -306,21 +388,22 @@ public sealed class BoundedRangeHttpStream : Stream
         _http = http;
         _url = resolved.Url;
         _userAgent = resolved.UserAgent;
+        _mediaOrigin = resolved.MediaOrigin;
         _length = resolved.ContentLength > 0 ? resolved.ContentLength : initialPage0.Length;
         _pages[0] = initialPage0;
         TriggerPrefetch(1);
-        TriggerPrefetch(2);
+        if (!ResourceSaverState.IsActive) TriggerPrefetch(2);
     }
 
     public static async Task<BoundedRangeHttpStream> OpenAsync(HttpClient http, ResolvedStream resolved, CancellationToken ct = default)
     {
-        var (data, total) = await FetchPageStaticAsync(http, resolved.Url, resolved.UserAgent, 0, resolved.ContentLength, ct);
+        var (data, total) = await FetchPageStaticAsync(http, resolved.Url, resolved.UserAgent, 0, resolved.ContentLength, ct, resolved.MediaOrigin);
         if (total > resolved.ContentLength) resolved.ContentLength = total;
         return new BoundedRangeHttpStream(http, resolved, data);
     }
 
     public static async Task<(byte[] Data, long Total)> FetchPageStaticAsync(
-        HttpClient http, string url, string ua, int pageIndex, long knownLength, CancellationToken ct)
+        HttpClient http, string url, string ua, int pageIndex, long knownLength, CancellationToken ct, string? mediaOrigin = null)
     {
         long start = (long)pageIndex * PageSize;
         long end = knownLength > 0 ? Math.Min(knownLength - 1, start + PageSize - 1) : start + PageSize - 1;
@@ -334,6 +417,11 @@ public sealed class BoundedRangeHttpStream : Stream
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, url);
                 req.Headers.TryAddWithoutValidation("User-Agent", ua);
+                if (!string.IsNullOrWhiteSpace(mediaOrigin))
+                {
+                    req.Headers.TryAddWithoutValidation("Origin", mediaOrigin);
+                    req.Headers.TryAddWithoutValidation("Referer", mediaOrigin.TrimEnd('/') + "/");
+                }
                 req.Headers.Range = new RangeHeaderValue(start, end);
 
                 using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -371,24 +459,26 @@ public sealed class BoundedRangeHttpStream : Stream
             if (_pages.TryGetValue(pageIndex, out var hit))
             {
                 TriggerPrefetch(pageIndex + 1);
-                TriggerPrefetch(pageIndex + 2);
+                if (!ResourceSaverState.IsActive) TriggerPrefetch(pageIndex + 2);
                 return hit;
             }
         }
 
-        var (data, total) = FetchPageStaticAsync(_http, _url, _userAgent, pageIndex, _length, CancellationToken.None)
+        var (data, total) = FetchPageStaticAsync(_http, _url, _userAgent, pageIndex, _length, CancellationToken.None, _mediaOrigin)
             .GetAwaiter().GetResult();
         lock (_sync)
         {
             if (total > _length) _length = total;
-            if (_pages.Count >= 36) // keep ~18 MiB cached per track
+            int pageCapacity = ResourceSaverState.IsActive ? 6 : 36; // ~3 MiB vs ~18 MiB per active track
+            while (_pages.Count >= pageCapacity)
             {
-                var furthest = _pages.Keys.OrderByDescending(k => Math.Abs(k - pageIndex)).First();
+                var furthest = _pages.Keys.Where(k => k != pageIndex).OrderByDescending(k => Math.Abs(k - pageIndex)).FirstOrDefault(-1);
+                if (furthest < 0) break;
                 _pages.Remove(furthest);
             }
             _pages[pageIndex] = data;
             TriggerPrefetch(pageIndex + 1);
-            TriggerPrefetch(pageIndex + 2);
+            if (!ResourceSaverState.IsActive) TriggerPrefetch(pageIndex + 2);
             return data;
         }
     }
@@ -406,7 +496,7 @@ public sealed class BoundedRangeHttpStream : Stream
         {
             try
             {
-                var (d, t) = await FetchPageStaticAsync(_http, _url, _userAgent, nextPage, _length, CancellationToken.None);
+                var (d, t) = await FetchPageStaticAsync(_http, _url, _userAgent, nextPage, _length, CancellationToken.None, _mediaOrigin);
                 lock (_sync)
                 {
                     if (t > _length) _length = t;

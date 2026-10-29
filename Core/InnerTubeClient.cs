@@ -18,7 +18,8 @@ public sealed record ClientSpec(
     string? DeviceMake = null,
     string? DeviceModel = null,
     string? AndroidSdk = null,
-    bool LoginSupported = false
+    bool LoginSupported = false,
+    string? Origin = null
 );
 
 public static class YouTubeClients
@@ -29,14 +30,14 @@ public static class YouTubeClients
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
     public static ClientSpec WebRemix { get; set; } = new(
-        "WEB_REMIX", "1.20260213.01.00", "67", WebUa, LoginSupported: true
+        "WEB_REMIX", "1.20260213.01.00", "67", WebUa,
+        LoginSupported: true, Origin: "https://music.youtube.com"
     );
 
     // Exact upstream Echo-Music YTPlayerUtils lead stream client: full-file 206 capable
     public static ClientSpec VisionOs { get; set; } = new(
-        "VISIONOS", "0.1", "101",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-        OsName: "visionOS", OsVersion: "1.3.21O771", DeviceMake: "Apple", DeviceModel: "RealityDevice14,1"
+        "VISIONOS", "1.02", "101",
+        "com.google.ios.youtube/1.02 (Macintosh; Intel Mac OS X 10_15_4) AppleWebKit/605.1.15 (KHTML, like Gecko)"
     );
 
     // Exact upstream Echo-Music secondary whole-file client
@@ -46,10 +47,17 @@ public static class YouTubeClients
         OsName: "Android", OsVersion: "12L", DeviceMake: "Oculus", DeviceModel: "Quest 3", AndroidSdk: "32"
     );
 
+    public static ClientSpec TvHtml5 { get; set; } = new(
+        "TVHTML5", "7.20260707.07.00", "7",
+        "Mozilla/5.0(SMART-TV; Linux; Tizen 4.0.0.2) AppleWebkit/605.1.15 (KHTML, like Gecko) SamsungBrowser/9.2 TV Safari/605.1.15",
+        OsName: "Tizen", OsVersion: "4.0.0.2", DeviceMake: "Samsung", DeviceModel: "Smart TV",
+        Origin: "https://www.youtube.com"
+    );
+
     public static ClientSpec AndroidVrLegacy { get; set; } = new(
         "ANDROID_VR", "1.43.32", "28",
-        "com.google.android.apps.youtube.vr.oculus/1.43.32 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-        OsName: "Android", OsVersion: "12L", DeviceMake: "Oculus", DeviceModel: "Quest 3", AndroidSdk: "32"
+        "com.google.android.apps.youtube.vr.oculus/1.43.32 (Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1; Cronet/107.0.5284.2)",
+        OsName: "Android", OsVersion: "12", DeviceMake: "Oculus", DeviceModel: "Quest 3", AndroidSdk: "32"
     );
 
     public static ClientSpec IpadOs { get; set; } = new(
@@ -99,6 +107,7 @@ public sealed class InnerTubeClient
     public string LanguageHl { get; set; } = "en";
     public string? CookieHeader { get; private set; }
     public string? DataSyncId { get; set; }
+    public string? CurrentVisitorData => _visitorData;
     public bool IsSignedIn => !string.IsNullOrWhiteSpace(CookieHeader) && (_cookies.ContainsKey("SAPISID") || _cookies.ContainsKey("__Secure-3PAPISID"));
 
     public InnerTubeClient()
@@ -318,10 +327,14 @@ public sealed class InnerTubeClient
                 req.Headers.TryAddWithoutValidation("X-Goog-Api-Format-Version", "1");
                 req.Headers.TryAddWithoutValidation("X-YouTube-Client-Name", spec.ClientId);
                 req.Headers.TryAddWithoutValidation("X-YouTube-Client-Version", spec.Version);
-                req.Headers.TryAddWithoutValidation("X-Origin", YouTubeClients.Origin);
-                req.Headers.TryAddWithoutValidation("Referer", YouTubeClients.Referer);
-                if (spec.LoginSupported)
-                    req.Headers.TryAddWithoutValidation("Origin", YouTubeClients.Origin);
+                // Only browser-shaped clients send browser origin headers. Native Android/iOS/VR
+                // profiles omit them; TVHTML5 uses youtube.com while WEB_REMIX uses Music.
+                if (!string.IsNullOrWhiteSpace(spec.Origin))
+                {
+                    req.Headers.TryAddWithoutValidation("X-Origin", spec.Origin);
+                    req.Headers.TryAddWithoutValidation("Origin", spec.Origin);
+                    req.Headers.TryAddWithoutValidation("Referer", spec.Origin.TrimEnd('/') + "/");
+                }
                 req.Headers.TryAddWithoutValidation("Accept-Language", $"{LanguageHl},{RegionGl};q=0.9,en;q=0.8");
                 if (!string.IsNullOrEmpty(_visitorData))
                     req.Headers.TryAddWithoutValidation("X-Goog-Visitor-Id", _visitorData);
