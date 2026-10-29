@@ -1,6 +1,7 @@
 <div align="center">
+  <img src="https://raw.githubusercontent.com/VishnuBele/echo-music-pc/main/Assets/echo-logo.png" alt="Echo Music logo" width="112">
 
-# Echo Music PC
+  <h1>Echo Music PC</h1>
 
 **Your music, on your desktop.**
 
