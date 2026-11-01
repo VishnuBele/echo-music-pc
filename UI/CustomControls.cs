@@ -41,7 +41,7 @@ public sealed class ScrollingTitleTextBlock : UserControl
             ToolTip.SetTip(this, Text);
             RecheckOverflow();
         }
-        else if (change.Property == TemplatedControl.FontSizeProperty || change.Property == TemplatedControl.FontWeightProperty || change.Property == TemplatedControl.ForegroundProperty)
+        else if (change.Property == TemplatedControl.FontSizeProperty || change.Property == TemplatedControl.FontWeightProperty || change.Property == TemplatedControl.FontFamilyProperty || change.Property == TemplatedControl.ForegroundProperty)
         {
             ApplyTextStyle();
             RecheckOverflow();
@@ -108,6 +108,7 @@ public sealed class ScrollingTitleTextBlock : UserControl
     {
         _first.FontSize = _repeat.FontSize = FontSize;
         _first.FontWeight = _repeat.FontWeight = FontWeight;
+        _first.FontFamily = _repeat.FontFamily = FontFamily;
         _first.Foreground = _repeat.Foreground = Foreground;
     }
 

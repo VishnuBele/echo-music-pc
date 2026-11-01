@@ -609,6 +609,12 @@ internal struct DoubleBiquad
         _a2 = target._a2;
     }
 
+    public void ResetState()
+    {
+        _z1 = 0;
+        _z2 = 0;
+    }
+
     public double Transform(double x)
     {
         double y = _b0 * x + _z1;
@@ -758,6 +764,23 @@ public sealed class EchoMasterMixer : ISampleProvider
             ClearReverbStateLocked();
             _reverbWasActive = false;
         }
+    }
+
+    // A newly selected track must not inherit either the previous track's reverb tail or
+    // its IIR-filter delay state; otherwise the first output block can contain a stale transient.
+    public void ResetTrackDspState()
+    {
+        lock (_dspLock)
+        {
+            ClearReverbStateLocked();
+            _reverbWasActive = false;
+            for (int ch = 0; ch < Channels; ch++)
+            {
+                _bassShelf[ch].ResetState();
+                for (int band = 0; band < 10; band++) _eqFilters[ch, band].ResetState();
+            }
+        }
+        ResetSpeedBuffer();
     }
 
     private void ClearReverbStateLocked()
@@ -1211,6 +1234,10 @@ public sealed class AudioEngine : IDisposable
     private DeckState? _historyDeck;
     private PlayHistoryEntry? _historyEntry;
     private long _historyLastPersistedMs;
+    private readonly object _historyLock = new();
+    private long _historyAccumulatedMs;
+    private long _historySampleAtTicks;
+    private double _historySamplePositionSec;
     private bool _playlistHistoryRecordedForQueue;
 
     // SponsorBlock per-track state
@@ -1218,6 +1245,7 @@ public sealed class AudioEngine : IDisposable
     private int _sponsorBlockRequestGeneration;
     private readonly HashSet<int> _triggeredSkipIndices = new();
     private DateTimeOffset _lastExternalSyncUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastDiscordReconnectUtc = DateTimeOffset.MinValue;
 
     // Sleep timer
     private DateTimeOffset? _sleepDeadlineUtc;
@@ -1318,25 +1346,39 @@ public sealed class AudioEngine : IDisposable
             return;
         }
 
-        // Non-Windows (Linux Xvfb / PulseAudio / headless verification):
+        // Linux sends actual PCM to ALSA's default device. On common desktop installs,
+        // the ALSA default plugin routes to PulseAudio or PipeWire automatically.
         _linuxPumpCts = new CancellationTokenSource();
         var ct = _linuxPumpCts.Token;
         _ = Task.Run(async () =>
         {
             var buf = new float[960 * 2]; // 20ms @ 48kHz stereo
-            var sw = Stopwatch.StartNew();
-            long tickIndex = 0;
-            while (!ct.IsCancellationRequested)
+            try
             {
-                _mixer.Read(buf, 0, buf.Length);
-                TickMaintenance();
-                tickIndex++;
-                long targetMs = tickIndex * 20;
-                int sleepMs = (int)(targetMs - sw.ElapsedMilliseconds);
-                if (sleepMs > 1)
-                    await Task.Delay(sleepMs, ct).ConfigureAwait(false);
-                else
-                    await Task.Yield();
+                using var output = LinuxAlsaAudioOutput.OpenDefault();
+                LastError = null;
+                while (!ct.IsCancellationRequested)
+                {
+                    _mixer.Read(buf, 0, buf.Length);
+                    output.Write(buf, 960);
+                    TickMaintenance();
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                LastError = $"Linux audio output unavailable: {ex.Message}";
+                ToastRequested?.Invoke(LastError);
+                StateChanged?.Invoke();
+                // Keep low-rate playback maintenance responsive, but never silently claim the
+                // hardware output is working when opening ALSA failed.
+                while (!ct.IsCancellationRequested)
+                {
+                    _mixer.Read(buf, 0, buf.Length);
+                    TickMaintenance();
+                    try { await Task.Delay(20, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                }
             }
         }, ct);
     }
@@ -1474,6 +1516,13 @@ public sealed class AudioEngine : IDisposable
             ToastRequested?.Invoke("Sleep timer paused playback");
         }
 
+        var presenceNowUtc = DateTimeOffset.UtcNow;
+        if (_discord.IsEnabled && !_discord.IsConnected && (presenceNowUtc - _lastDiscordReconnectUtc).TotalSeconds >= 5.0)
+        {
+            _lastDiscordReconnectUtc = presenceNowUtc;
+            _ = Task.Run(() => _discord.UpdatePresenceAsync(CurrentTrack, IsPlaying, PositionSeconds, DurationSeconds));
+        }
+
         // While a newly selected track is resolving, do not let the previous deck advance,
         // trigger SponsorBlock/crossfade, or publish its old timeline for the new title.
         if (IsLoading)
@@ -1513,12 +1562,12 @@ public sealed class AudioEngine : IDisposable
         }
 
         // Periodic SMTC timeline keepalive every ~5s
-        if ((DateTimeOffset.UtcNow - _lastExternalSyncUtc).TotalSeconds >= 5.0)
+        var nowUtc = DateTimeOffset.UtcNow;
+        if ((nowUtc - _lastExternalSyncUtc).TotalSeconds >= 5.0)
         {
-            _lastExternalSyncUtc = DateTimeOffset.UtcNow;
+            _lastExternalSyncUtc = nowUtc;
             _smtc.UpdateTrackAndState(CurrentTrack, IsPlaying, pos, dur);
         }
-
         if (dur <= 8) return;
 
         double rem = dur - pos;
@@ -2063,8 +2112,7 @@ public sealed class AudioEngine : IDisposable
         FlushQueuedOutput();
         outgoing?.Dispose();
         fading?.Dispose();
-        _mixer.ResetSpeedBuffer();
-        _mixer.ResetReverbState();
+        _mixer.ResetTrackDspState();
         _crossfadeTriggeredForTrack = false;
         _activeSkipSegments = new();
         _triggeredSkipIndices.Clear();
@@ -2213,32 +2261,65 @@ public sealed class AudioEngine : IDisposable
         throw new InvalidOperationException($"Unsupported container: {resolved.MimeType}");
     }
 
+    internal static long CountAudibleIntervalMilliseconds(
+        double previousPositionSec, double currentPositionSec, double elapsedMilliseconds,
+        double playbackSpeed, bool audioRunning)
+    {
+        if (!audioRunning || !double.IsFinite(previousPositionSec) || !double.IsFinite(currentPositionSec)
+            || !double.IsFinite(elapsedMilliseconds) || elapsedMilliseconds < 20 || elapsedMilliseconds > 2500)
+            return 0;
+        double positionDelta = currentPositionSec - previousPositionSec;
+        if (positionDelta < 0.02) return 0; // paused/buffering/backward seek
+        double expectedDelta = elapsedMilliseconds / 1000.0 * Math.Clamp(playbackSpeed, 0.5, 1.75);
+        if (positionDelta > expectedDelta * 1.8 + 0.25) return 0; // forward seek, not listened time
+        return Math.Max(0, (long)Math.Round(Math.Min(elapsedMilliseconds, 1500)));
+    }
+
     private void RecordCurrentHistoryIfAny(bool forceUpdate = true)
     {
-        var deck = _mixer.PrimaryDeck;
-        if (deck is null) return;
-        if (!ReferenceEquals(_historyDeck, deck))
+        lock (_historyLock)
         {
-            _historyDeck = deck;
-            _historyEntry = null;
-            _historyLastPersistedMs = 0;
-        }
+            var deck = _mixer.PrimaryDeck;
+            if (deck is null) return;
+            double position = deck.PositionSeconds;
+            long nowTicks = Stopwatch.GetTimestamp();
+            if (!ReferenceEquals(_historyDeck, deck))
+            {
+                _historyDeck = deck;
+                _historyEntry = null;
+                _historyLastPersistedMs = 0;
+                _historyAccumulatedMs = 0;
+                _historySamplePositionSec = position;
+                _historySampleAtTicks = nowTicks;
+                return;
+            }
 
-        long ms = (long)(deck.PositionSeconds * 1000);
-        if (ms < 4000) return; // ignore micro-clicks
-        bool skipped = deck.DurationSeconds > 20 && deck.PositionSeconds < Math.Min(25, deck.DurationSeconds * 0.25);
-        if (_historyEntry is null)
-        {
-            // Record the source playlist only once per playback queue, after audible playback begins.
-            RecordQueueSourceIfPending();
-            _historyEntry = _store.RecordPlay(deck.Track, ms, skipped);
+            double elapsedMs = _historySampleAtTicks == 0
+                ? 0
+                : (nowTicks - _historySampleAtTicks) * 1000.0 / Stopwatch.Frequency;
+            bool audioRunning = ReferenceEquals(deck, _mixer.PrimaryDeck) && !_mixer.IsPaused && !IsLoading;
+            _historyAccumulatedMs += CountAudibleIntervalMilliseconds(
+                _historySamplePositionSec, position, elapsedMs, _mixer.PlaybackSpeed, audioRunning);
+            _historySampleAtTicks = nowTicks;
+            _historySamplePositionSec = position;
+
+            // Wrapped uses elapsed audible listening time, not the decoder's absolute playhead.
+            // Scrubbing forward/backward therefore never inflates minutes listened.
+            long ms = _historyAccumulatedMs;
+            if (ms < 4000) return; // ignore micro-clicks and short accidental starts
+            bool skipped = deck.DurationSeconds > 20 && position < Math.Min(25, deck.DurationSeconds * 0.25);
+            if (_historyEntry is null)
+            {
+                RecordQueueSourceIfPending();
+                _historyEntry = _store.RecordPlay(deck.Track, ms, skipped);
+                _historyLastPersistedMs = ms;
+                return;
+            }
+
+            if (!forceUpdate && ms - _historyLastPersistedMs < 15_000) return;
+            _store.UpdatePlayHistory(_historyEntry, ms, skipped);
             _historyLastPersistedMs = ms;
-            return;
         }
-
-        if (!forceUpdate && ms - _historyLastPersistedMs < 15_000) return;
-        _store.UpdatePlayHistory(_historyEntry, ms, skipped);
-        _historyLastPersistedMs = ms;
     }
 
     private void RecordQueueSourceIfPending()

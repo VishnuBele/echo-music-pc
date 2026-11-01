@@ -44,14 +44,26 @@ public sealed class LyricsService
             var pending = new List<Task<LyricsData?>>
             {
                 TrySimpMusicAsync(track.Id, cleanTitle, track.DurationSeconds, providerCts.Token),
-                TryYouLyPlusAsync(cleanTitle, cleanArtist, track.Album?.Name, track.DurationSeconds, track.Id, providerCts.Token),
                 TryNativeLyricsAsync(track.Id, providerCts.Token),
                 TryYouTubeTranscriptAsync(track.Id, providerCts.Token),
-                TryUnisonAsync(cleanTitle, cleanArtist, track.Album?.Name, track.DurationSeconds, track.Id, providerCts.Token),
-                TryPaxSenixAsync(cleanTitle, cleanArtist, track.DurationSeconds, track.Album?.Name, providerCts.Token),
-                TryBetterLyricsAsync(track.Title, CleanArtist(bestArtist ?? ""), track.DurationSeconds, track.Album?.Name, track.Id, providerCts.Token),
-                TryBetterLyricsAsync(cleanTitle, cleanArtist, track.DurationSeconds, track.Album?.Name, track.Id, providerCts.Token),
             };
+            if (track.IsVideo)
+            {
+                // A music-video ID is its own lyric target. Do not query title-only catalog sources
+                // (LRCLIB/KuGou/BetterLyrics/Pax/YouLyPlus) and then label those song-only lines as
+                // if they belonged to the longer video. The exact-video transcript and ID endpoints
+                // retain their own timestamps; absent those, return no match rather than wrong lyrics.
+                pending.Add(TryUnisonAsync(cleanTitle, cleanArtist, track.Album?.Name, track.DurationSeconds,
+                    track.Id, providerCts.Token, videoIdOnly: true));
+            }
+            else
+            {
+                pending.Add(TryYouLyPlusAsync(cleanTitle, cleanArtist, track.Album?.Name, track.DurationSeconds, track.Id, providerCts.Token));
+                pending.Add(TryUnisonAsync(cleanTitle, cleanArtist, track.Album?.Name, track.DurationSeconds, track.Id, providerCts.Token));
+                pending.Add(TryPaxSenixAsync(cleanTitle, cleanArtist, track.DurationSeconds, track.Album?.Name, providerCts.Token));
+                pending.Add(TryBetterLyricsAsync(track.Title, CleanArtist(bestArtist ?? ""), track.DurationSeconds, track.Album?.Name, track.Id, providerCts.Token));
+                pending.Add(TryBetterLyricsAsync(cleanTitle, cleanArtist, track.DurationSeconds, track.Album?.Name, track.Id, providerCts.Token));
+            }
             var candidates = new List<LyricsData>();
             var deadline = Task.Delay(TimeSpan.FromSeconds(13), ct);
             Task stopAfterFirstSynced = deadline;
@@ -65,17 +77,28 @@ public sealed class LyricsService
                 LyricsData? candidate = null;
                 try { candidate = await providerTask; } catch { }
                 if (candidate is null || candidate.Lines.Count == 0) continue;
+                if (track.IsVideo && !candidate.IsVideoSpecific) continue;
                 if (string.IsNullOrWhiteSpace(candidate.TimingSourceVideoId))
                     candidate.TimingSourceVideoId = string.IsNullOrWhiteSpace(candidate.VideoId) ? track.Id : candidate.VideoId;
                 candidate.VideoId = track.Id;
+                if (track.IsVideo && candidate.IsVideoSpecific
+                    && candidate.Provider.Contains("YouTube Transcript", StringComparison.OrdinalIgnoreCase)
+                    && IsUsableSynced(candidate, track.DurationSeconds))
+                {
+                    providerCts.Cancel();
+                    _cache[track.Id] = candidate;
+                    return candidate;
+                }
                 if (candidate.IsInstrumental || IsUsableSynced(candidate, track.DurationSeconds) || !candidate.IsSynced)
                 {
                     candidates.Add(candidate);
                     if (candidate.IsSynced && IsUsableSynced(candidate, track.DurationSeconds) && !sawUsableSynced)
                     {
                         sawUsableSynced = true;
-                        // Give concurrently-started providers a short chance to return a better match.
-                        stopAfterFirstSynced = Task.Delay(TimeSpan.FromMilliseconds(2200), ct);
+                        // Songs can settle after one result plus a short ranking window. For videos,
+                        // keep all exact-ID providers active until their captions have had time to return.
+                        if (!track.IsVideo)
+                            stopAfterFirstSynced = Task.Delay(TimeSpan.FromMilliseconds(2200), ct);
                     }
                 }
             }
@@ -83,6 +106,18 @@ public sealed class LyricsService
             ct.ThrowIfCancellationRequested();
 
             var syncedCandidates = candidates.Where(x => x.IsSynced && IsUsableSynced(x, track.DurationSeconds)).ToList();
+            if (track.IsVideo)
+            {
+                // Captions are already on the exact video's clock; prefer them over any catalog
+                // lyric candidate and never apply the short-song intro heuristic to these timestamps.
+                var videoTranscript = syncedCandidates.FirstOrDefault(x =>
+                    x.Provider.Contains("YouTube Transcript", StringComparison.OrdinalIgnoreCase));
+                if (videoTranscript is not null)
+                {
+                    _cache[track.Id] = videoTranscript;
+                    return videoTranscript;
+                }
+            }
             if (syncedCandidates.Count > 0)
             {
                 var best = syncedCandidates.OrderByDescending(x => ScoreCandidate(x, track.DurationSeconds)).First();
@@ -101,6 +136,16 @@ public sealed class LyricsService
                 instrumental.VideoId = track.Id;
                 _cache[track.Id] = instrumental;
                 return instrumental;
+            }
+            if (track.IsVideo)
+            {
+                if (providerPlain is not null)
+                {
+                    providerPlain.VideoId = track.Id;
+                    _cache[track.Id] = providerPlain;
+                    return providerPlain;
+                }
+                return new LyricsData { VideoId = track.Id, Provider = "No video-specific lyrics found" };
             }
         }
 
@@ -247,11 +292,13 @@ public sealed class LyricsService
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(6));
+            timeout.CancelAfter(TimeSpan.FromSeconds(12));
             var lines = await _yt.GetTranscriptAsync(videoId, timeout.Token);
             return lines.Count == 0 ? null : new LyricsData
             {
                 VideoId = videoId,
+                TimingSourceVideoId = videoId,
+                IsVideoSpecific = true,
                 IsSynced = true,
                 Provider = "YouTube Transcript",
                 Lines = lines,
@@ -267,7 +314,13 @@ public sealed class LyricsService
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(12));
-            return await _yt.GetMusicLyricsAsync(videoId, timeout.Token);
+            var lyrics = await _yt.GetMusicLyricsAsync(videoId, timeout.Token);
+            if (lyrics is not null)
+            {
+                lyrics.IsVideoSpecific = true;
+                lyrics.TimingSourceVideoId = videoId;
+            }
+            return lyrics;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { return null; }
@@ -327,20 +380,22 @@ public sealed class LyricsService
         catch { return null; }
     }
 
-    private async Task<LyricsData?> TryUnisonAsync(string title, string artist, string? album, int durationSec, string videoId, CancellationToken ct)
+    private async Task<LyricsData?> TryUnisonAsync(string title, string artist, string? album, int durationSec, string videoId, CancellationToken ct, bool videoIdOnly = false)
     {
-        if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(artist)) return null;
+        if (string.IsNullOrWhiteSpace(videoId) || (!videoIdOnly && (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(artist)))) return null;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(5));
-            foreach (var url in new[]
+            var endpoints = new List<(string Url, bool VideoSpecific)>
             {
-                $"https://unison.boidu.dev/lyrics?v={Uri.EscapeDataString(videoId)}",
-                $"https://unison.boidu.dev/lyrics?song={Uri.EscapeDataString(title)}&artist={Uri.EscapeDataString(artist)}"
+                ($"https://unison.boidu.dev/lyrics?v={Uri.EscapeDataString(videoId)}", true),
+            };
+            if (!videoIdOnly)
+                endpoints.Add(($"https://unison.boidu.dev/lyrics?song={Uri.EscapeDataString(title)}&artist={Uri.EscapeDataString(artist)}"
                     + (string.IsNullOrWhiteSpace(album) ? "" : $"&album={Uri.EscapeDataString(album)}")
-                    + (durationSec > 0 ? $"&duration={durationSec}" : ""),
-            })
+                    + (durationSec > 0 ? $"&duration={durationSec}" : ""), false));
+            foreach (var (url, videoSpecific) in endpoints)
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.TryAddWithoutValidation("User-Agent", "EchoMusicLyrics/2.0.0");
@@ -351,6 +406,17 @@ public sealed class LyricsService
                 if (root?["success"]?.GetValue<bool>() != true) continue;
                 var raw = root["data"]?["lyrics"]?.GetValue<string>();
                 if (string.IsNullOrWhiteSpace(raw)) continue;
+                if (raw.Contains("<tt", StringComparison.OrdinalIgnoreCase) || raw.Contains("<p ", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Unison may return timed-text markup rather than LRC. Do not split that XML
+                    // into fake untimed lyric lines; parse its begin/end/word timestamps instead.
+                    var ttml = ParseTtmlLyrics(raw, videoSpecific ? "Unison Video TTML" : "Unison TTML");
+                    if (ttml is null || ttml.Lines.Count == 0) continue;
+                    ttml.VideoId = videoId;
+                    ttml.IsVideoSpecific = videoSpecific;
+                    ttml.TimingSourceVideoId = videoSpecific ? videoId : "";
+                    return ttml;
+                }
                 var lines = ParseLrc(raw, out var wordSync);
                 if (lines.Count == 0)
                     lines = SplitPlainLyrics(raw);
@@ -360,6 +426,8 @@ public sealed class LyricsService
                     IsSynced = lines.Any(x => x.TimeSec.HasValue),
                     HasWordSync = wordSync,
                     Provider = wordSync ? "Unison Word-Sync" : "Unison",
+                    IsVideoSpecific = videoSpecific,
+                    TimingSourceVideoId = videoSpecific ? videoId : "",
                     Lines = lines,
                 };
             }
@@ -469,13 +537,25 @@ public sealed class LyricsService
 
     private static bool TitlesAreCompatible(string expected, string candidate)
     {
-        if (string.IsNullOrWhiteSpace(candidate) || string.IsNullOrWhiteSpace(expected)) return true;
-        var a = NormalizeLyricText(CleanTitle(expected)).Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
-        var b = NormalizeLyricText(CleanTitle(candidate)).Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
-        if (a.Count == 0 || b.Count == 0) return true;
-        if (string.Join(' ', a).Contains(string.Join(' ', b), StringComparison.Ordinal) ||
-            string.Join(' ', b).Contains(string.Join(' ', a), StringComparison.Ordinal)) return true;
-        return a.Intersect(b).Count() / (double)Math.Min(a.Count, b.Count) >= 0.5;
+        if (string.IsNullOrWhiteSpace(candidate) || string.IsNullOrWhiteSpace(expected)) return false;
+        static HashSet<string> Tokens(string value)
+        {
+            // Trim uploader credits and generic format tags, but retain meaningful edition words
+            // such as "remix" so a different version is not mistaken for the same recording.
+            value = Regex.Replace(value, @"\s*\|\s*.*$", "");
+            value = Regex.Replace(value, @"\s*[\(\[]\s*(?:with|feat\.?|featuring|ft\.?)\b[^\)\]]*[\)\]]", " ", RegexOptions.IgnoreCase);
+            value = Regex.Replace(value, @"\b(?:official\s+)?(?:music\s+)?(?:video|audio|lyrics?|visualizer)\b.*$", " ", RegexOptions.IgnoreCase);
+            value = Regex.Replace(value, @"\b(?:with|feat\.?|featuring|ft\.?)\b.*$", " ", RegexOptions.IgnoreCase);
+            value = Regex.Replace(value, @"\s+(?:theme\s+)?song$", "", RegexOptions.IgnoreCase);
+            return NormalizeLyricText(CleanTitle(value)).Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
+        }
+        var a = Tokens(expected);
+        var b = Tokens(candidate);
+        if (a.Count == 0 || b.Count == 0) return false;
+        if (a.SetEquals(b)) return true;
+        int common = a.Intersect(b).Count();
+        double jaccard = common / (double)a.Union(b).Count();
+        return common >= 2 && jaccard >= 0.67;
     }
 
     private async Task<LyricsData?> TrySimpMusicAsync(string videoId, string expectedTitle, int durationSec, CancellationToken ct)
@@ -526,6 +606,8 @@ public sealed class LyricsService
                             return new LyricsData
                             {
                                 VideoId = videoId,
+                                TimingSourceVideoId = videoId,
+                                IsVideoSpecific = true,
                                 IsSynced = true,
                                 HasWordSync = wordSync,
                                 Provider = wordSync ? "SimpMusic Word-Sync" : "SimpMusic Synced",
@@ -541,6 +623,8 @@ public sealed class LyricsService
                             return new LyricsData
                             {
                                 VideoId = videoId,
+                                TimingSourceVideoId = videoId,
+                                IsVideoSpecific = true,
                                 IsSynced = parsed.Count > 0,
                                 HasWordSync = wordSync,
                                 Provider = parsed.Count > 0 ? "SimpMusic Synced" : "SimpMusic Plain",

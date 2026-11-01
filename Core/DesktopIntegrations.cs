@@ -153,11 +153,12 @@ public sealed class DiscordRpcClient : IDisposable
     private bool _disposed;
 
     public bool IsEnabled { get; set; } = true;
+    public bool IsConnected => _pipe is { IsConnected: true };
 
     public async Task UpdatePresenceAsync(TrackItem? track, bool isPlaying, double posSec, double durSec)
     {
         if (_disposed) return;
-        if (!IsEnabled || track is null || !isPlaying)
+        if (!IsEnabled)
         {
             await ClearPresenceAsync();
             return;
@@ -169,20 +170,27 @@ public sealed class DiscordRpcClient : IDisposable
             if (!await EnsureConnectedAsync()) return;
 
             long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            long startMs = nowMs - (long)(posSec * 1000);
+            bool hasTrack = track is not null;
+            long startMs = nowMs - (long)(Math.Max(0, posSec) * 1000);
             long endMs = durSec > 1 ? startMs + (long)(durSec * 1000) : 0;
 
-            // Discord IPC accepts registered application asset keys, not arbitrary image URLs.
-            // Sending the YouTube cover URL as large_image makes Discord reject SET_ACTIVITY;
-            // keep the activity payload portable and let Discord show the app's configured icon.
-            var activity = new JsonObject
-            {
-                ["type"] = 2, // ActivityType.Listening
-                ["details"] = ClipStr(track.Title, 120),
-                ["state"] = ClipStr($"by {(!string.IsNullOrWhiteSpace(track.AlbumArtist) ? track.AlbumArtist : track.ArtistNames)}", 120),
-            };
+            // Keep an idle/paused app presence instead of clearing it. Playing tracks switch
+            // to Discord's Listening activity; paused and idle states identify Echo Music.
+            var activity = isPlaying && track is not null
+                ? new JsonObject
+                {
+                    ["type"] = 2, // ActivityType.Listening
+                    ["details"] = ClipStr(track.Title, 120),
+                    ["state"] = ClipStr($"by {(!string.IsNullOrWhiteSpace(track.AlbumArtist) ? track.AlbumArtist : track.ArtistNames)}", 120),
+                }
+                : new JsonObject
+                {
+                    ["type"] = 0, // ActivityType.Playing
+                    ["details"] = "Echo Music",
+                    ["state"] = hasTrack ? ClipStr($"Paused · {track!.Title}", 120) : "Ready to listen",
+                };
 
-            if (endMs > startMs)
+            if (isPlaying && track is not null && endMs > startMs)
             {
                 activity["timestamps"] = new JsonObject
                 {
@@ -191,7 +199,7 @@ public sealed class DiscordRpcClient : IDisposable
                 };
             }
 
-            if (!track.IsLocal && !string.IsNullOrEmpty(track.Id))
+            if (isPlaying && track is { IsLocal: false } && !string.IsNullOrEmpty(track.Id))
             {
                 activity["buttons"] = new JsonArray
                 {
@@ -855,7 +863,7 @@ public static class Win32TaskbarIconHelper
 
 public static class DynamicConfigService
 {
-    public const string CurrentAppVersion = "2.0.2";
+    public const string CurrentAppVersion = "2.0.3";
 
     public static void ApplyOverridesIfPresent(string dataDir)
     {

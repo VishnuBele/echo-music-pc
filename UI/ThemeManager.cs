@@ -139,6 +139,7 @@ public static class ThemeManager
         "PlusJakarta" => new FontFamily("avares://EchoMusic/Assets/Fonts#Plus Jakarta Sans, Segoe UI, Nirmala UI, Leelawadee UI, Malgun Gothic, Yu Gothic UI, avares://EchoMusic/Assets/Fonts/Indic#Noto Sans Devanagari, sans-serif"),
         "Outfit" => new FontFamily("avares://EchoMusic/Assets/Fonts#Outfit, Segoe UI, Nirmala UI, Leelawadee UI, Malgun Gothic, Yu Gothic UI, avares://EchoMusic/Assets/Fonts/Indic#Noto Sans Devanagari, sans-serif"),
         "Inter" => new FontFamily("avares://Avalonia.Fonts.Inter/Assets#Inter, Segoe UI, Nirmala UI, Leelawadee UI, Malgun Gothic, Yu Gothic UI, avares://EchoMusic/Assets/Fonts/Indic#Noto Sans Devanagari, sans-serif"),
+        "Arial" => new FontFamily("Arial, Segoe UI, Nirmala UI, Leelawadee UI, Malgun Gothic, Yu Gothic UI, avares://EchoMusic/Assets/Fonts/Indic#Noto Sans Devanagari, sans-serif"),
         "System" => new FontFamily("Segoe UI, Nirmala UI, Leelawadee UI, Malgun Gothic, Yu Gothic UI, avares://EchoMusic/Assets/Fonts/Indic#Noto Sans Devanagari, sans-serif"),
         // Default: Static 5-weight CircularGeo (440/510/600/690/780 optical weights) + full Windows Indic/Asian script fallbacks!
         _ => new FontFamily("avares://EchoMusic/Assets/Fonts/CircularGeo#CircularGeo, Segoe UI, Nirmala UI, Leelawadee UI, Malgun Gothic, Yu Gothic UI, Microsoft YaHei UI, avares://EchoMusic/Assets/Fonts/Indic#Noto Sans Devanagari, sans-serif"),

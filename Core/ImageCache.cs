@@ -17,7 +17,7 @@ public static class ImageCache
     private static readonly SemaphoreSlim SaverImageSlots = new(2, 2);
     private static readonly ConcurrentDictionary<string, Lazy<Task<Bitmap?>>> Inflight = new(StringComparer.Ordinal);
     private static readonly Regex VideoThumbRegex = new(@"/vi/([A-Za-z0-9_-]{11})/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static int _memCapacity = 72;
+    private static int _memCapacity = 40;
     private static volatile bool _resourceSaver;
 
     public static void SetResourceSaver(bool enabled)
@@ -26,7 +26,7 @@ public static class ImageCache
         ResourceSaverState.IsActive = enabled;
         lock (MemLock)
         {
-            _memCapacity = enabled ? 12 : 72;
+            _memCapacity = enabled ? 10 : 40;
             TrimMemoryCache();
         }
     }
@@ -96,7 +96,7 @@ public static class ImageCache
             try
             {
                 using var ms = new MemoryStream(bytes, writable: false);
-                return Bitmap.DecodeToWidth(ms, _resourceSaver ? 384 : 640);
+                return Bitmap.DecodeToWidth(ms, _resourceSaver ? 256 : 384);
             }
             catch { return null; }
         }

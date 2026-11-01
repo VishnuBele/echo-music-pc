@@ -829,13 +829,72 @@ public sealed class InnerTubeClient
 
     public async Task<List<LyricLine>> GetTranscriptAsync(string videoId, CancellationToken ct = default)
     {
+        // Ask exact-video player metadata first: the engagement-panel transcript can select an
+        // ASR track before the app has a chance to prefer a creator-supplied caption track.
+        // Gather candidates across clients before fetching so a manual track exposed by the
+        // secondary client outranks an ASR track exposed by the first one.
+        var captionCandidates = new List<(ClientSpec Client, string Url, string Language, bool IsAuto, int ClientOrder)>();
+        var clients = new[] { YouTubeClients.VisionOs, YouTubeClients.Ios };
+        for (int clientIndex = 0; clientIndex < clients.Length; clientIndex++)
+        {
+            var client = clients[clientIndex];
+            JsonNode? player;
+            try { player = await GetPlayerRawAsync(videoId, client, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { continue; }
+
+            if (player?["captions"]?["playerCaptionsTracklistRenderer"]?["captionTracks"] is not JsonArray tracks)
+                continue;
+            foreach (var track in tracks.OfType<JsonObject>())
+            {
+                var url = track["baseUrl"]?.GetValue<string>();
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                    || uri.Scheme != Uri.UriSchemeHttps
+                    || (!uri.Host.Equals("www.youtube.com", StringComparison.OrdinalIgnoreCase)
+                        && !uri.Host.Equals("youtube.com", StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                captionCandidates.Add((client, url!, track["languageCode"]?.GetValue<string>() ?? "",
+                    string.Equals(track["kind"]?.GetValue<string>(), "asr", StringComparison.OrdinalIgnoreCase), clientIndex));
+            }
+        }
+
+        var language = string.IsNullOrWhiteSpace(LanguageHl) ? "en" : LanguageHl;
+        foreach (var candidate in captionCandidates
+            .DistinctBy(x => x.Url, StringComparer.Ordinal)
+            .OrderBy(x => x.IsAuto)
+            .ThenByDescending(x => x.Language.StartsWith(language, StringComparison.OrdinalIgnoreCase))
+            .ThenBy(x => x.ClientOrder))
+        {
+            try
+            {
+                var url = candidate.Url + (candidate.Url.Contains('?') ? "&" : "?") + "fmt=json3";
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.TryAddWithoutValidation("User-Agent", candidate.Client.UserAgent);
+                request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
+                using var response = await _http.SendAsync(request, ct);
+                if (!response.IsSuccessStatusCode) continue;
+                var json = await response.Content.ReadAsStringAsync(ct);
+                var lines = InnertubeParsers.ParseTimedTextJson3(JsonNode.Parse(json));
+                if (lines.Count > 0) return lines;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { /* Try the next caption track/client for this same video. */ }
+        }
+
+        // Some clients expose only the engagement-panel transcript. Keep it as an exact-video
+        // fallback, after the richer player caption tracks have been checked.
         var body = new JsonObject
         {
             ["videoId"] = videoId,
             ["params"] = "engagement-panel-searchable-transcript-search-panel"
         };
-        var root = await PostAsync("get_transcript", body, ct: ct);
-        return InnertubeParsers.ParseTranscript(root);
+        try
+        {
+            var root = await PostAsync("get_transcript", body, ct: ct);
+            return InnertubeParsers.ParseTranscript(root);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { return new List<LyricLine>(); }
     }
 
     public async Task<(string Name, string Handle)?> VerifyAccountAsync(CancellationToken ct = default)

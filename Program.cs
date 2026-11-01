@@ -59,7 +59,7 @@ public static class Program
 
     private static async Task<int> RunHeadlessSelfTestAsync()
     {
-        Console.WriteLine("=== Echo Music v2.0.2 Native Engine End-to-End Self-Test ===");
+        Console.WriteLine("=== Echo Music v2.0.3 Native Engine End-to-End Self-Test ===");
 
         // [0/8] Verify C1-continuous SmoothLimit has ZERO step discontinuity across [-1.5, +1.5]
         float maxStep = 0f;
@@ -78,6 +78,36 @@ public static class Program
         bool formattedCorrectly = formattedBlob.Count > 4 && formattedBlob.All(x => x.Text.Length <= 56 && x.TimeSec is null);
         Console.WriteLine($"[lyrics-format] Oversized single-timestamp lyric paragraph split into {formattedBlob.Count} plain lines (maxLine={formattedBlob.Max(x => x.Text.Length)}; no false sync={formattedCorrectly})");
         if (!formattedCorrectly) return 11;
+
+        var transcriptCueFixture = System.Text.Json.Nodes.JsonNode.Parse("""
+        {"contents":[
+          {"transcriptSegmentRenderer":{"snippet":{"runs":[{"text":"first phrase"}]},"startMs":"1000","endMs":"1800"}},
+          {"transcriptSegmentRenderer":{"snippet":{"runs":[{"text":"next phrase"}]},"startMs":"2500","endMs":"3100"}},
+          {"transcriptSegmentRenderer":{"snippet":{"runs":[{"text":" same cue"}]},"startMs":"2520","endMs":"3200"}}
+        ]}
+        """);
+        var transcriptCues = InnertubeParsers.ParseTranscript(transcriptCueFixture);
+        bool transcriptTimingPreserved = transcriptCues.Count == 2
+            && transcriptCues[0].TimeSec == 1.0
+            && transcriptCues[1].TimeSec == 2.5
+            && transcriptCues[1].Text.Contains("next phrase", StringComparison.Ordinal)
+            && transcriptCues[1].Text.Contains("same cue", StringComparison.Ordinal);
+        Console.WriteLine($"[transcript-cue-timing] Later phrases keep their own cue times; same-time fragments coalesce={transcriptTimingPreserved}");
+        if (!transcriptTimingPreserved) return 15;
+
+        bool listeningTimeCorrect = AudioEngine.CountAudibleIntervalMilliseconds(10, 11, 1000, 1, true) == 1000
+            && AudioEngine.CountAudibleIntervalMilliseconds(10, 45, 1000, 1, true) == 0
+            && AudioEngine.CountAudibleIntervalMilliseconds(10, 10, 1000, 1, true) == 0
+            && AudioEngine.CountAudibleIntervalMilliseconds(10, 11, 1000, 1, false) == 0;
+        Console.WriteLine($"[wrapped-audible-time] Counts played elapsed time and rejects seek/pause intervals={listeningTimeCorrect}");
+        if (!listeningTimeCorrect) return 13;
+
+        var filterResetProbe = DoubleBiquad.PeakingEq(EchoMasterMixer.SampleRate, 1000, 1.4, 6);
+        _ = filterResetProbe.Transform(1);
+        filterResetProbe.ResetState();
+        bool cleanTrackDspReset = Math.Abs(filterResetProbe.Transform(0)) < 1e-12;
+        Console.WriteLine($"[track-dsp-reset] IIR history clears at a new track boundary={cleanTrackDspReset}");
+        if (!cleanTrackDspReset) return 14;
 
         var timingFixture = System.Text.Json.Nodes.JsonNode.Parse("""
         {"contents":[{"playlistPanelVideoWrapperRenderer":{"primaryRenderer":{"playlistPanelVideoRenderer":{"videoId":"playing-video"}},"counterpart":[{"counterpartRenderer":{"playlistPanelVideoRenderer":{"videoId":"source-audio"}},"segmentMap":{"segment":[{"primaryVideoStartTimeMilliseconds":"1200","counterpartVideoStartTimeMilliseconds":"500","durationMilliseconds":"800"}]}}]}}]}

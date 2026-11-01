@@ -10,14 +10,14 @@ Download the current release from the [Echo Music releases page](https://github.
 
 ### Windows 10/11
 
-1. Download `EchoMusic-Setup-v2.0.2-x64.exe` from the release assets.
+1. Download `EchoMusic-Setup-v2.0.3-x64.exe` from the release assets.
 2. Open it and follow the setup screens. It installs for your Windows user and includes the .NET runtime; you do not need to install .NET separately or use an administrator account.
 
 The installer is **unsigned**. Windows SmartScreen or antivirus software may display a warning. Check that the file came from the official release and verify its SHA-256 before opening it. I never ask you to turn off antivirus protection.
 
 ### Linux (x86-64)
 
-1. Download and extract `EchoMusic-Linux-v2.0.2-x64.tar.gz`.
+1. Download and extract `EchoMusic-Linux-v2.0.3-x64.tar.gz`.
 2. Open a terminal in the extracted folder and run:
 
    ```sh
@@ -25,7 +25,7 @@ The installer is **unsigned**. Windows SmartScreen or antivirus software may dis
    ./install.sh
    ```
 
-The installer adds a per-user copy and an application-menu shortcut. To uninstall, run `~/.local/opt/echo-music/uninstall.sh`. The Linux package requires the .NET 8 Runtime and your desktop’s usual graphics and audio libraries. This build is for x86-64 Linux, not ARM64.
+The installer adds a per-user copy and an application-menu shortcut. This compact package requires the .NET 8 runtime (`Microsoft.NETCore.App` 8.0); the installer checks for it. Your desktop also needs its usual graphics and audio libraries. The package is for x86-64 Linux, not ARM64. See `README-LINUX.md` for the self-contained build option.
 
 ## What I built into Echo Music
 
@@ -60,9 +60,9 @@ Shortcuts that use a single letter are available when a text field is not focuse
 | `Alt` + `←` / `→` | Go back or forward in navigation history |
 | `Esc` | Close the topmost dialog or fullscreen player; clear search when applicable |
 
-## About this release — v2.0.2
+## About this release — v2.0.3
 
-This release focuses on the requested flicker and memory fixes. Lyrics and album art now update without opacity pulses or fade flashes; History updates the changed song row in place, and the Now Playing dock avoids rebuilding its cards when artwork or track details arrive. Resource Saver now limits artwork resolution and cache size, concurrent image loads, stream-page buffering, and next-track prewarming. Earlier playback, lyric-sync, scrolling, sidebar, and Windows output-device fixes remain. The two remaining Android-specific guest-playback measures are intentionally deferred for a later release.
+This focused UI follow-up smooths the playlist header fade, shows a live spectrum in the playing track's Home/Search play badge, clarifies Resource Saver status on hover, and resumes visuals across stale desktop foreground transitions. Other screens and behaviors are left unchanged.
 
 ## Privacy and local data
 

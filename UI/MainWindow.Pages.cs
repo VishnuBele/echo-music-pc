@@ -420,7 +420,7 @@ public partial class MainWindow
                 var g = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("Auto,*") };
                 g.Children.Add(new PathIcon { Data = icon, Width = 18, Height = 18, Foreground = ResBrush("TextPrimaryBrush"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 14, 0) });
                 var st = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-                st.Children.Add(new TextBlock { Text = title, FontSize = 14.5, FontWeight = FontWeight.Bold });
+                st.Children.Add(new ScrollingTitleTextBlock { Text = title, FontSize = 14.5, FontWeight = FontWeight.Bold });
                 if (!string.IsNullOrEmpty(sub))
                     st.Children.Add(new TextBlock { Text = sub, FontSize = 11.5, Foreground = ResBrush("TextSecondaryBrush") });
                 Grid.SetColumn(st, 1);
@@ -718,7 +718,7 @@ public partial class MainWindow
             art = new Border { Width = 132, Height = 132, CornerRadius = new CornerRadius(6), ClipToBounds = true, Child = image };
         }
         stack.Children.Add(art);
-        stack.Children.Add(new TextBlock { Text = entry.Title, FontSize = 12.5, FontWeight = FontWeight.Bold, MaxLines = 2, TextWrapping = TextWrapping.Wrap });
+        stack.Children.Add(new ScrollingTitleTextBlock { Text = entry.Title, FontSize = 12.5, FontWeight = FontWeight.Bold });
         stack.Children.Add(new TextBlock
         {
             Text = DateTimeOffset.FromUnixTimeMilliseconds(Math.Max(0, entry.PlayedAt)).ToLocalTime().ToString("MMM d, h:mm tt"),
@@ -1975,7 +1975,7 @@ public partial class MainWindow
             _store.SaveDebounced();
         }));
 
-        themeCard.Children.Add(BuildChoiceRow("App Typography", new[] { ("SpotifyCircular", "Default"), ("PlusJakarta", "Plus Jakarta Sans"), ("Outfit", "Outfit"), ("System", "System Segoe UI") }, s.FontChoice, v =>
+        themeCard.Children.Add(BuildChoiceRow("App Typography", new[] { ("SpotifyCircular", "Default"), ("PlusJakarta", "Plus Jakarta Sans"), ("Outfit", "Outfit"), ("Inter", "Inter"), ("Arial", "Arial"), ("System", "System Segoe UI") }, s.FontChoice, v =>
         {
             s.FontChoice = v;
             ApplyThemeAndTypography();
@@ -2080,7 +2080,7 @@ public partial class MainWindow
 
         var discordPreview = BuildDiscordActivityPreview();
         discordPreview.IsVisible = s.DiscordRpcEnabled;
-        intCard.Children.Add(BuildToggleRow("Discord Rich Presence", "Share your current track and playback progress with Discord", s.DiscordRpcEnabled, v =>
+        intCard.Children.Add(BuildToggleRow("Discord Rich Presence", "Show Echo Music while idle or paused, and switch to Listening when a track plays", s.DiscordRpcEnabled, v =>
         {
             s.DiscordRpcEnabled = v;
             _audio.ApplySettingsFromStore();
@@ -2145,7 +2145,9 @@ public partial class MainWindow
                     ? $"Update available: {latestRelease.Tag} (installed: v{DynamicConfigService.CurrentAppVersion})."
                     : latestRelease.ParsedVersion is null
                         ? $"Found release {latestRelease.Tag}; its version tag could not be compared automatically."
-                        : $"You're up to date. Latest release: {latestRelease.Tag}.";
+                        : current is not null && latestRelease.ParsedVersion < current
+                            ? $"Installed v{DynamicConfigService.CurrentAppVersion} is newer than the latest published release ({latestRelease.Tag})."
+                            : $"You're up to date. Latest release: {latestRelease.Tag}.";
                 getReleaseBtn.Content = latestRelease.InstallerUrl is null ? "Open release page" : newer ? $"Open installer for {latestRelease.Tag}" : "Open latest release";
                 getReleaseBtn.IsVisible = true;
             }
@@ -2159,7 +2161,10 @@ public partial class MainWindow
         getReleaseBtn.Click += (_, _) =>
         {
             if (latestRelease is null) return;
-            string target = latestRelease.InstallerUrl ?? latestRelease.ReleaseUrl;
+            var installedVersion = AppUpdateService.ParseVersion(DynamicConfigService.CurrentAppVersion);
+            bool releaseIsNewer = latestRelease.ParsedVersion is not null && installedVersion is not null
+                && latestRelease.ParsedVersion > installedVersion;
+            string target = releaseIsNewer ? latestRelease.InstallerUrl ?? latestRelease.ReleaseUrl : latestRelease.ReleaseUrl;
             try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(target) { UseShellExecute = true }); }
             catch (Exception ex) { updateStatus.Text = $"Couldn't open the release download: {ex.Message}"; }
         };
@@ -2182,7 +2187,7 @@ public partial class MainWindow
         }, CurrentPerformanceMode, SetPerformanceMode));
         sysCard.Children.Add(new TextBlock
         {
-            Text = "Low limits visual work; Auto uses balanced frame pacing; High follows available display-synchronized frames without a software cap. Faster scrolling is not intended—only smoother motion. Resource Saver still reduces visual work. The display itself sets the maximum refresh.",
+            Text = "Low conserves resources; Auto balances smoothness and efficiency; High follows your display. Scrolling speed is unchanged.",
             FontSize = 11.5,
             Foreground = ResBrush("TextMutedBrush"),
             TextWrapping = TextWrapping.Wrap,
@@ -2396,9 +2401,9 @@ public partial class MainWindow
         _discordPreviewStatus.Text = !enabled
             ? "Discord sharing is turned off"
             : _audio.IsPlaying ? "Listening to Echo Music"
-            : track is not null ? "Paused in Echo Music" : "Nothing playing";
-        _discordPreviewTrack!.Text = track?.Title ?? "Nothing playing";
-        _discordPreviewArtists!.Text = track is null ? "Select a song to preview the activity" : $"by {track.ArtistNames}";
+            : track is not null ? "Paused in Echo Music" : "Echo Music is open";
+        _discordPreviewTrack!.Text = track?.Title ?? "Echo Music";
+        _discordPreviewArtists!.Text = track is null ? "Ready to listen" : $"by {track.ArtistNames}";
         double duration = Math.Max(0, _audio.DurationSeconds);
         double position = Math.Clamp(_audio.PositionSeconds, 0, duration > 0 ? duration : 0);
         double ratio = duration > 0.1 ? Math.Clamp(position / duration, 0, 1) : 0;

@@ -209,6 +209,9 @@ public sealed class LyricsData
     public bool IsSynced { get; set; }
     public bool HasWordSync { get; set; }
     public bool IsInstrumental { get; set; }
+    // True only when the provider resolved captions/lyrics against this exact YouTube video ID.
+    // This keeps music-video lookup separate from catalog-only song lyric fallbacks.
+    internal bool IsVideoSpecific { get; set; }
     public double AppliedTimingOffsetSeconds { get; set; }
     public string Provider { get; set; } = "";
     public List<LyricLine> Lines { get; set; } = new();
@@ -300,7 +303,7 @@ public sealed class AppSettings
     public string AudioBackend { get; set; } = "Win32WaveOut"; // Win32WaveOut | DirectSound | NAudioWaveOut | WasapiPolling
     public int AudioDeviceId { get; set; } = -1; // -1 = Windows Default Sound Mapper
     public bool FollowWindowsDefaultAudioDevice { get; set; } = true;
-    public string FontChoice { get; set; } = "SpotifyCircular"; // SpotifyCircular | PlusJakarta | Outfit | Inter | System
+    public string FontChoice { get; set; } = "SpotifyCircular"; // SpotifyCircular | PlusJakarta | Outfit | Inter | Arial | System
     public string UiDensity { get; set; } = "Comfortable"; // Comfortable | Compact
     public string AudioQuality { get; set; } = "Best"; // DataSaver | Normal | High | Best
     public double Volume { get; set; } = 0.85;

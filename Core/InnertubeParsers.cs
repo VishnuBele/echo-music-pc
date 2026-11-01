@@ -1086,6 +1086,31 @@ public static class InnertubeParsers
         };
     }
 
+    public static List<LyricLine> ParseTimedTextJson3(JsonNode? root)
+    {
+        var cues = new List<LyricLine>();
+        if (root?["events"] is not JsonArray events) return cues;
+        foreach (var evt in events.OfType<JsonObject>())
+        {
+            if (evt["tStartMs"] is null || evt["segs"] is not JsonArray segments) continue;
+            if (!double.TryParse(evt["tStartMs"]!.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var startMs)) continue;
+            double.TryParse(evt["dDurationMs"]?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var durationMs);
+            var text = string.Concat(segments.Select(seg =>
+                seg?["utf8"] is JsonValue value && value.TryGetValue<string>(out var part) ? part : ""));
+            text = NormalizeLyricWhitespace(text);
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            var start = Math.Max(0, startMs / 1000d);
+            var end = durationMs > 0 ? start + durationMs / 1000d : (double?)null;
+            if (cues.Count > 0 && Math.Abs((cues[^1].TimeSec ?? -1) - start) < 0.03)
+            {
+                cues[^1].Text = $"{cues[^1].Text} {text}".Trim();
+                if (end is not null) cues[^1].EndSec = end;
+            }
+            else cues.Add(new LyricLine { TimeSec = start, EndSec = end, Text = text });
+        }
+        return cues;
+    }
+
     public static List<LyricLine> ParseTranscript(JsonNode? root)
     {
         var raw = new List<(double Start, double End, string Text)>();
@@ -1100,18 +1125,20 @@ public static class InnertubeParsers
                 raw.Add((sm / 1000.0, em / 1000.0, txt));
             }
         });
-        var merged = new List<LyricLine>();
-        foreach (var s in raw)
+        // A transcript segment's start time belongs to that segment. Combining consecutive
+        // phrases into the first phrase's cue can make later words appear several seconds early.
+        // Only join fragments that share effectively the same timestamp (the same displayed cue).
+        var cues = new List<LyricLine>();
+        foreach (var s in raw.OrderBy(x => x.Start))
         {
-            if (merged.Count == 0 || s.Start - (merged[^1].TimeSec ?? 0) > 5.0 || merged[^1].Text.Length > 84)
-                merged.Add(new LyricLine { TimeSec = s.Start, EndSec = s.End, Text = s.Text });
-            else
+            if (cues.Count > 0 && Math.Abs((cues[^1].TimeSec ?? -1) - s.Start) < 0.05)
             {
-                merged[^1].Text = $"{merged[^1].Text} {s.Text}".Trim();
-                merged[^1].EndSec = s.End;
+                cues[^1].Text = $"{cues[^1].Text} {s.Text}".Trim();
+                if (s.End > 0) cues[^1].EndSec = Math.Max(cues[^1].EndSec ?? 0, s.End);
             }
+            else cues.Add(new LyricLine { TimeSec = s.Start, EndSec = s.End > 0 ? s.End : null, Text = s.Text });
         }
-        return merged;
+        return cues;
     }
 
     public static (string Name, string Handle)? ParseAccountInfo(JsonNode? root)

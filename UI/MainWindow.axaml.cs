@@ -15,6 +15,8 @@ using Avalonia.Threading;
 using Avalonia.VisualTree;
 using EchoMusic.Core;
 using AnyAscii;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace EchoMusic.UI;
@@ -35,6 +37,7 @@ public partial class MainWindow : Window
     private SpectrumVisualizerControl? _dockCurrentArtSpectrum;
     private Border? _dockCurrentArtSpectrumPlate;
     private readonly List<(WeakReference<Border> Overlay, WeakReference<SpectrumVisualizerControl> Visualizer, string TrackId)> _trackArtSpectra = new();
+    private readonly List<(WeakReference<PathIcon> PlayIcon, WeakReference<SpectrumVisualizerControl> Visualizer, string TrackId)> _trackPlayIndicators = new();
     private readonly HashSet<DispatcherTimer> _lyricsShimmerTimers = new();
     private string? _bufferMonitorTrackId;
     private double _bufferMonitorPosition;
@@ -68,8 +71,14 @@ public partial class MainWindow : Window
         public double TargetY;
         public double VelocityX;
         public double VelocityY;
+        public double LastAppliedX;
+        public double LastAppliedY;
     }
     private readonly Dictionary<ScrollViewer, SmoothScrollState> _smoothScrollStates = new();
+    private IPointer? _activeScrollBarDragPointer;
+    private readonly HashSet<ScrollViewer> _manuallyScrolledLyricViewers = new();
+    private bool _homeContinuationPendingUntilDragEnds;
+    private bool _lastForegroundVisible;
     private bool _animationFramePending;
     private bool _hasLastMotionFrame;
     private TimeSpan _lastMotionFrameTime;
@@ -85,6 +94,22 @@ public partial class MainWindow : Window
         public required DateTime StartedUtc { get; init; }
     }
     private readonly Dictionary<Image, ImageShimmerState> _imageShimmers = new();
+    private sealed class DeferredArtworkLoad
+    {
+        public required string Url { get; init; }
+        public Control? Fallback { get; init; }
+        public ScrollViewer? Viewer { get; set; }
+        public EventHandler<VisualTreeAttachmentEventArgs>? AttachHandler { get; set; }
+        public EventHandler<VisualTreeAttachmentEventArgs>? DetachHandler { get; set; }
+    }
+    private sealed class DeferredArtworkTracker
+    {
+        public required EventHandler<ScrollChangedEventArgs> ScrollHandler { get; init; }
+        public required DispatcherTimer Timer { get; init; }
+        public readonly HashSet<Image> Pending = new();
+    }
+    private readonly Dictionary<Image, DeferredArtworkLoad> _deferredArtwork = new();
+    private readonly Dictionary<ScrollViewer, DeferredArtworkTracker> _deferredArtworkTrackers = new();
     private DispatcherTimer? _imageShimmerTimer;
     private ScrollViewer? _dockLyricsScroller;
     private StackPanel? _historyTrackListStack;
@@ -167,6 +192,15 @@ public partial class MainWindow : Window
         _extras = new MusicDnaAndExtras(_yt);
 
         InitializeComponent();
+        if (OperatingSystem.IsLinux())
+        {
+            // Linux Mint/Cinnamon already supplies native caption buttons. Keep the themed
+            // in-app toolbar, but let the window manager own the only minimize/maximize/close set.
+            ExtendClientAreaToDecorationsHint = false;
+            MinimizeWindowBtn.IsVisible = false;
+            MaximizeWindowBtn.IsVisible = false;
+            CloseWindowBtn.IsVisible = false;
+        }
         ImageCache.SetResourceSaver(IsResourceSaverActive);
         ScrollingTitleTextBlock.AnimationRequested += EnsureAnimationFramePump;
         SearchSuggestFlyout.PlacementTarget = GlobalSearchBox;
@@ -186,7 +220,12 @@ public partial class MainWindow : Window
         FsLyricsScroller.SizeChanged += (_, _) =>
         {
             double width = FsLyricsScroller.Bounds.Width;
-            if (width > 0) FsLyricsStack.Width = width;
+            if (width > 0)
+            {
+                // Keep the whole lyric column centered as one block. Fixed shared width plus
+                // left-aligned rows avoids the visually drifting edges of individually centered lines.
+                FsLyricsStack.Width = Math.Max(220, Math.Min(width - 32, Math.Min(940, width * 0.72)));
+            }
         };
 
         PropertyChanged += (_, e) =>
@@ -212,9 +251,13 @@ public partial class MainWindow : Window
                 }, DispatcherPriority.Loaded);
             }
         };
-        Deactivated += (_, _) => UpdateWindowActivityState();
+        Deactivated += (_, _) =>
+        {
+            EndDirectScrollInteraction(_activeScrollBarDragPointer);
+            UpdateWindowActivityState();
+        };
 
-        _uiTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Render, OnUiFrameTick);
+        _uiTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, OnUiFrameTick);
         _uiTimer.Start();
 
         Opened += OnWindowOpened;
@@ -435,8 +478,49 @@ public partial class MainWindow : Window
         }
     }
 
+    private const uint GaRootOwner = 3;
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder className, int maxCount);
+
+    private static bool IsDesktopShellWindow(IntPtr hwnd)
+    {
+        var className = new StringBuilder(64);
+        if (GetClassName(hwnd, className, className.Capacity) <= 0) return false;
+        return className.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd";
+    }
+
+    private bool IsForegroundVisible
+    {
+        get
+        {
+            if (!IsVisible || WindowState == WindowState.Minimized) return false;
+            if (!OperatingSystem.IsWindows()) return IsActive;
+            try
+            {
+                var handle = TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+                if (handle == IntPtr.Zero) return IsActive;
+                if (!IsWindowVisible(handle) || IsIconic(handle)) return false;
+                var foreground = GetForegroundWindow();
+                if (foreground == handle || (foreground != IntPtr.Zero && GetAncestor(foreground, GaRootOwner) == handle))
+                    return true;
+                // During shutdown of an external app Windows can briefly leave a stale or shell
+                // foreground HWND. Treat that transition as an empty desktop, not a competing app,
+                // so the visible Echo window resumes its visuals without requiring a click.
+                if (foreground == IntPtr.Zero || !IsWindow(foreground) || !IsWindowVisible(foreground)
+                    || IsDesktopShellWindow(foreground))
+                    return true;
+                return false;
+            }
+            catch { return IsActive; }
+        }
+    }
+
     private bool IsResourceSaverActive => ResourceSaverPolicy == "On"
-        || (ResourceSaverPolicy == "Auto" && (!IsActive || !IsVisible || WindowState == WindowState.Minimized));
+        || (ResourceSaverPolicy == "Auto" && !IsForegroundVisible);
 
     private string CurrentPerformanceMode => _store.Settings.PerformanceMode is "Low" or "Auto" or "High"
         ? _store.Settings.PerformanceMode
@@ -446,9 +530,9 @@ public partial class MainWindow : Window
     // These are update caps, not promised monitor refresh rates. High uses each compositor animation tick.
     private int ConfiguredAnimationRate => CurrentPerformanceMode switch { "Low" => 30, "High" => 120, _ => 60 };
 
-    private TimeSpan AnimationFrameInterval => TimeSpan.FromSeconds(1.0 / (IsResourceSaverActive ? 30 : ConfiguredAnimationRate));
+    private TimeSpan AnimationFrameInterval => TimeSpan.FromSeconds(1.0 / (IsResourceSaverActive || !IsForegroundVisible ? 30 : ConfiguredAnimationRate));
 
-    private TimeSpan DesiredUiInterval => (!IsVisible || WindowState == WindowState.Minimized)
+    private TimeSpan DesiredUiInterval => !IsForegroundVisible
         ? TimeSpan.FromMilliseconds(500)
         : (_audio.IsPlaying || _audio.IsLoading || _streamBuffering)
             ? AnimationFrameInterval
@@ -458,9 +542,12 @@ public partial class MainWindow : Window
 
     private void UpdateWindowActivityState()
     {
-        bool unavailable = !IsVisible || WindowState == WindowState.Minimized;
-        ImageCache.SetResourceSaver(IsResourceSaverActive);
-        ScrollingTitleTextBlock.SetPerformanceMode(CurrentPerformanceMode, IsResourceSaverActive);
+        bool foregroundVisible = IsForegroundVisible;
+        _lastForegroundVisible = foregroundVisible;
+        bool pauseVisualWork = !foregroundVisible;
+        bool reduceResources = IsResourceSaverActive || pauseVisualWork;
+        ImageCache.SetResourceSaver(reduceResources);
+        ScrollingTitleTextBlock.SetPerformanceMode(CurrentPerformanceMode, reduceResources);
         var animationInterval = AnimationFrameInterval;
         _visualMotionTimer.Interval = animationInterval;
         if (IsResourceSaverActive)
@@ -468,25 +555,27 @@ public partial class MainWindow : Window
         foreach (var timer in _lyricsShimmerTimers)
         {
             timer.Interval = animationInterval;
-            if (unavailable) timer.Stop();
+            if (pauseVisualWork) timer.Stop();
             else if (!timer.IsEnabled) timer.Start();
         }
         if (_imageShimmers.Count > 0)
         {
             EnsureImageShimmerTimer();
             _imageShimmerTimer!.Interval = animationInterval;
-            if (unavailable) _imageShimmerTimer.Stop();
+            if (pauseVisualWork) _imageShimmerTimer.Stop();
             else if (!_imageShimmerTimer.IsEnabled) _imageShimmerTimer.Start();
         }
         else _imageShimmerTimer?.Stop();
 
-        if (unavailable)
+        if (pauseVisualWork)
         {
-            // Keep low-rate audio maintenance alive in the tray (sleep timers, history, crossfade/next-track),
+            // Keep low-rate audio maintenance alive in the tray/background (sleep timers, history, crossfade/next-track),
             // while stopping all UI animation and high-frequency render work.
             _uiTimer.Interval = DesiredUiInterval;
             _uiTimer.Start();
             _visualMotionTimer.Stop();
+            _imageShimmerTimer?.Stop();
+            _searchSuggestFadeTimer?.Stop();
             _heroAutoTimer?.Stop();
             _smoothScrollStates.Clear();
             _hasLastMotionFrame = false;
@@ -512,6 +601,7 @@ public partial class MainWindow : Window
         {
             _uiTimer.Interval = DesiredUiInterval;
             _uiTimer.Start();
+            _searchSuggestFadeTimer?.Start();
             if (IsResourceSaverActive) _heroAutoTimer?.Stop();
             else if (_activeNavKey == "home") _heroAutoTimer?.Start();
         }
@@ -550,15 +640,16 @@ public partial class MainWindow : Window
     private void UpdateResourceSaverButtonVisual()
     {
         if (ResourceSaverIcon is null) return;
-        bool backgroundAuto = ResourceSaverPolicy == "Auto" && (!IsActive || WindowState == WindowState.Minimized || !IsVisible);
+        bool backgroundAuto = ResourceSaverPolicy == "Auto" && !IsForegroundVisible;
         ResourceSaverIcon.Foreground = ResBrush(IsResourceSaverActive ? "AccentBrush" : "TextMutedBrush");
-        ToolTip.SetTip(ResourceSaverBtn, ResourceSaverPolicy switch
+        string status = ResourceSaverPolicy switch
         {
-            "On" => "Resource Saver: On. Click cycles modes; right-click to choose.",
-            "Off" => "Resource Saver: Off. Click cycles modes; right-click to choose.",
-            _ when backgroundAuto => "Resource Saver: Auto active in the background. Click cycles modes; right-click to choose.",
-            _ => "Resource Saver: Auto. Click cycles modes; right-click to choose.",
-        });
+            "On" => "On · reduced visual and background work active",
+            "Off" => "Off · normal visual work active",
+            _ when backgroundAuto => "Auto · active in the background",
+            _ => "Auto · inactive while Echo is in the foreground",
+        };
+        ToolTip.SetTip(ResourceSaverBtn, $"Resource Saver — {status}\nClick to cycle modes · right-click for options");
     }
 
     private void BuildResourceSaverContextMenu()
@@ -587,6 +678,8 @@ public partial class MainWindow : Window
         _leftSidebarAnimation?.Stop();
         _rightSidebarAnimation?.Stop();
         _smoothScrollStates.Clear();
+        _activeScrollBarDragPointer = null;
+        _manuallyScrolledLyricViewers.Clear();
         ScrollingTitleTextBlock.AnimationRequested -= EnsureAnimationFramePump;
         foreach (var image in _imageShimmers.Keys.ToArray()) StopImageLoadingShimmer(image);
         foreach (var timer in _lyricsShimmerTimers) timer.Stop();
@@ -730,6 +823,9 @@ public partial class MainWindow : Window
         ForwardNavBtn.Click += async (_, _) => await GoForwardAsync();
         CenterScrollViewer.ScrollChanged += OnCenterScrollChanged;
         AddHandler(InputElement.PointerWheelChangedEvent, OnSmoothPointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(InputElement.PointerPressedEvent, OnScrollInteractionPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(InputElement.PointerReleasedEvent, OnScrollInteractionPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(InputElement.PointerCaptureLostEvent, OnScrollInteractionPointerCaptureLost, RoutingStrategies.Tunnel, handledEventsToo: true);
         AddHandler(InputElement.PointerPressedEvent, OnMouseNavigationButtons, RoutingStrategies.Tunnel, handledEventsToo: true);
 
         // Sidebar navigation
@@ -1075,13 +1171,13 @@ public partial class MainWindow : Window
     private void EnsureVisualMotionTimerRunning()
     {
         _visualMotionTimer.Interval = AnimationFrameInterval;
-        if (IsVisible && !_visualMotionTimer.IsEnabled)
+        if (IsForegroundVisible && !_visualMotionTimer.IsEnabled)
             _visualMotionTimer.Start();
     }
 
     private void OnVisualMotionTick(object? sender, EventArgs e)
     {
-        if (!IsVisible || WindowState == WindowState.Minimized)
+        if (!IsForegroundVisible)
         {
             _visualMotionTimer.Stop();
             return;
@@ -1107,8 +1203,13 @@ public partial class MainWindow : Window
 
     private void OnUiFrameTick(object? sender, EventArgs e)
     {
+        // Some window managers do not reliably deliver a second Activated notification after an
+        // overlay or another app is closed. Re-check the native foreground owner on the still-live
+        // low-rate maintenance timer so visual work resumes without requiring a click.
+        bool foregroundVisible = IsForegroundVisible;
+        if (foregroundVisible != _lastForegroundVisible) UpdateWindowActivityState();
         _audio.TickMaintenance();
-        if (!IsVisible || WindowState == WindowState.Minimized) return;
+        if (!foregroundVisible) return;
         var desiredInterval = DesiredUiInterval;
         if (_uiTimer.Interval != desiredInterval) _uiTimer.Interval = desiredInterval;
 
@@ -1182,7 +1283,10 @@ public partial class MainWindow : Window
             SleepTimerTopLabel.IsVisible = false;
         }
 
-        bool spectrumNeedsDecay = !MiniBarSpectrum.IsSettled
+        bool cardSpectrumNeedsDecay = _trackPlayIndicators.Any(entry =>
+            entry.Visualizer.TryGetTarget(out var visualizer) && !visualizer.IsSettled);
+        bool spectrumNeedsDecay = cardSpectrumNeedsDecay
+            || !MiniBarSpectrum.IsSettled
             || (_flowSpectrum is { IsVisible: true, IsSettled: false })
             || (_dockOpen && _dockTab == "now" && _dockCurrentArtSpectrum is { IsVisible: true, IsSettled: false })
             || (FullscreenOverlay.IsVisible && (!FsSpectrum.IsSettled || !FsArtSpectrum.IsSettled));
@@ -1218,6 +1322,21 @@ public partial class MainWindow : Window
             bool show = _audio.IsPlaying && string.Equals(entry.TrackId, activeTrackId, StringComparison.Ordinal);
             if (overlay.IsVisible != show) overlay.IsVisible = show;
             if (show) visualizer.UpdateBands(_fftScratch, true);
+        }
+        for (int i = _trackPlayIndicators.Count - 1; i >= 0; i--)
+        {
+            var entry = _trackPlayIndicators[i];
+            if (!entry.PlayIcon.TryGetTarget(out var playIcon)
+                || !entry.Visualizer.TryGetTarget(out var visualizer)
+                || playIcon.GetVisualRoot() is null)
+            {
+                _trackPlayIndicators.RemoveAt(i);
+                continue;
+            }
+            bool playingHere = _audio.IsPlaying && string.Equals(entry.TrackId, activeTrackId, StringComparison.Ordinal);
+            if (playIcon.IsVisible == playingHere) playIcon.IsVisible = !playingHere;
+            if (visualizer.IsVisible != playingHere) visualizer.IsVisible = playingHere;
+            if (playingHere || !visualizer.IsSettled) visualizer.UpdateBands(_fftScratch, playingHere);
         }
 
         SyncActiveLyricHighlight(pos);
@@ -1286,6 +1405,7 @@ public partial class MainWindow : Window
 
     private void RefreshLyricsAfterSeek()
     {
+        _manuallyScrolledLyricViewers.Clear();
         _lastActiveLyricIdx = -1;
         if (!_audio.IsLoading) SyncActiveLyricHighlight(_audio.PositionSeconds);
     }
@@ -1442,6 +1562,7 @@ public partial class MainWindow : Window
         _lyricsFetchCts?.Dispose();
         _lyricsFetchCts = track is null ? null : new CancellationTokenSource();
         _currentLyrics = null;
+        _manuallyScrolledLyricViewers.Clear();
         _currentDna = null;
         _relatedTracks = new();
         _lastActiveLyricIdx = -1;
@@ -1579,7 +1700,7 @@ public partial class MainWindow : Window
     {
         // Infer a long spoken/video intro only when the timed lyrics otherwise cover nearly a
         // complete song. This avoids title-specific constants and leaves ordinary audio untouched.
-        if (!track.IsVideo || !lyrics.IsSynced || lyrics.Lines.Count < 12 || track.DurationSeconds < 90
+        if (!track.IsVideo || lyrics.IsVideoSpecific || !lyrics.IsSynced || lyrics.Lines.Count < 12 || track.DurationSeconds < 90
             || Math.Abs(lyrics.AppliedTimingOffsetSeconds) > 0.05 || lyrics.TimingMap.Count > 0) return;
 
         var timed = lyrics.Lines.Where(line => line.TimeSec.HasValue)
@@ -2051,7 +2172,7 @@ public partial class MainWindow : Window
                 Foreground = new SolidColorBrush(Color.Parse("#D8FFFFFF")),
                 Background = Brushes.Transparent,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
-                TextAlignment = TextAlignment.Center,
+                TextAlignment = TextAlignment.Left,
                 Margin = new Thickness(8, 4),
                 Transitions = new Transitions
                 {
@@ -2072,6 +2193,51 @@ public partial class MainWindow : Window
         _lastActiveLyricIdx = -1;
     }
 
+    private void OnScrollInteractionPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        var source = e.Source as Control;
+        var visualAncestors = source?.GetVisualAncestors().ToList() ?? new List<Visual>();
+        var scrollbar = source as ScrollBar ?? visualAncestors.OfType<ScrollBar>().FirstOrDefault();
+        var viewer = source as ScrollViewer ?? visualAncestors.OfType<ScrollViewer>().FirstOrDefault();
+
+        if (scrollbar is not null || viewer is not null)
+        {
+            // Treat any pressed pointer inside a viewer as direct user control. This covers a
+            // templated Thumb even if Avalonia reports its source as an internal presenter rather
+            // than the ScrollBar, and prevents smooth-wheel/auto-follow writes until release.
+            _activeScrollBarDragPointer = e.Pointer;
+            _smoothScrollStates.Clear();
+            if (viewer is not null)
+            {
+                StopSmoothScroll(viewer);
+                if (ReferenceEquals(viewer, FsLyricsScroller) || ReferenceEquals(viewer, _dockLyricsScroller))
+                    _manuallyScrolledLyricViewers.Add(viewer);
+            }
+            return;
+        }
+    }
+
+    private void OnScrollInteractionPointerReleased(object? sender, PointerReleasedEventArgs e) =>
+        EndDirectScrollInteraction(e.Pointer);
+
+    private void OnScrollInteractionPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e) =>
+        EndDirectScrollInteraction(e.Pointer);
+
+    private void EndDirectScrollInteraction(IPointer? pointer)
+    {
+        if (pointer is null || !ReferenceEquals(_activeScrollBarDragPointer, pointer)) return;
+        _activeScrollBarDragPointer = null;
+        if (_homeContinuationPendingUntilDragEnds)
+        {
+            _homeContinuationPendingUntilDragEnds = false;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_activeNavKey == "home" && !_loadingMoreHome && !string.IsNullOrEmpty(_homeContinuation))
+                    _ = AppendNextHomeContinuationAsync();
+            }, DispatcherPriority.Background);
+        }
+    }
+
     private void OnMouseNavigationButtons(object? sender, PointerPressedEventArgs e)
     {
         var update = e.GetCurrentPoint(this).Properties.PointerUpdateKind;
@@ -2089,10 +2255,19 @@ public partial class MainWindow : Window
 
     private void OnSmoothPointerWheel(object? sender, PointerWheelEventArgs e)
     {
-        if (e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
+        if (_activeScrollBarDragPointer is not null || e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
         Control? current = e.Source as Control;
+        var ancestry = new List<Control>();
+        if (current is not null)
+        {
+            ancestry.Add(current);
+            foreach (var visual in current.GetVisualAncestors().OfType<Control>())
+                if (!ancestry.Contains(visual)) ancestry.Add(visual);
+            for (var parent = current.Parent as Control; parent is not null; parent = parent.Parent as Control)
+                if (!ancestry.Contains(parent)) ancestry.Add(parent);
+        }
 
-        for (var probe = current; probe is not null; probe = probe.Parent as Control)
+        foreach (var probe in ancestry)
         {
             if (probe is ScrollBar) return;
             if (probe is SeekProgressControl progressControl)
@@ -2119,7 +2294,7 @@ public partial class MainWindow : Window
         ScrollViewer? viewer = null;
         double maxY = 0;
         double currentY = 0;
-        for (var probe = current; probe is not null; probe = probe.Parent as Control)
+        foreach (var probe in ancestry)
         {
             if (probe is not ScrollViewer candidate) continue;
             double candidateMax = Math.Max(0, candidate.Extent.Height - candidate.Viewport.Height);
@@ -2134,6 +2309,8 @@ public partial class MainWindow : Window
             break;
         }
         if (viewer is null) return;
+        if (ReferenceEquals(viewer, FsLyricsScroller) || ReferenceEquals(viewer, _dockLyricsScroller))
+            _manuallyScrolledLyricViewers.Add(viewer);
 
         // Keep the wheel's distance; small touchpad deltas stay fractional and are not discarded.
         double pixelsPerUnit = Math.Clamp(viewer.Viewport.Height * 0.115, 72, 100);
@@ -2161,13 +2338,20 @@ public partial class MainWindow : Window
 
     private void QueueSmoothScrollTarget(ScrollViewer viewer, double targetX, double targetY)
     {
+        if (_activeScrollBarDragPointer is not null) return;
         var maxX = Math.Max(0, viewer.Extent.Width - viewer.Viewport.Width);
         var maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
         targetX = Math.Clamp(targetX, 0, maxX);
         targetY = Math.Clamp(targetY, 0, maxY);
         if (!_smoothScrollStates.TryGetValue(viewer, out var state))
         {
-            state = new SmoothScrollState { TargetX = viewer.Offset.X, TargetY = viewer.Offset.Y };
+            state = new SmoothScrollState
+            {
+                TargetX = viewer.Offset.X,
+                TargetY = viewer.Offset.Y,
+                LastAppliedX = viewer.Offset.X,
+                LastAppliedY = viewer.Offset.Y,
+            };
             _smoothScrollStates[viewer] = state;
         }
         state.TargetX = targetX;
@@ -2177,7 +2361,7 @@ public partial class MainWindow : Window
 
     private void EnsureAnimationFramePump()
     {
-        if (_animationFramePending || !IsVisible || WindowState == WindowState.Minimized) return;
+        if (_animationFramePending || !IsForegroundVisible) return;
         _animationFramePending = true;
         RequestAnimationFrame(AdvanceAnimationFrame);
     }
@@ -2185,7 +2369,7 @@ public partial class MainWindow : Window
     private void AdvanceAnimationFrame(TimeSpan frameTime)
     {
         _animationFramePending = false;
-        if (!IsVisible || WindowState == WindowState.Minimized)
+        if (!IsForegroundVisible)
         {
             _hasLastMotionFrame = false;
             return;
@@ -2212,6 +2396,11 @@ public partial class MainWindow : Window
 
     private void AdvanceSmoothScrolls(double elapsedSeconds)
     {
+        if (_activeScrollBarDragPointer is not null)
+        {
+            _smoothScrollStates.Clear();
+            return;
+        }
         const double omega = 19.0; // critically damped spring; independent of wheel-event cadence
         foreach (var pair in _smoothScrollStates.ToArray())
         {
@@ -2224,14 +2413,31 @@ public partial class MainWindow : Window
             }
 
             var offset = viewer.Offset;
-            double dx = state.TargetX - offset.X;
-            double dy = state.TargetY - offset.Y;
-            state.VelocityX += (omega * omega * dx - 2 * omega * state.VelocityX) * elapsedSeconds;
-            state.VelocityY += (omega * omega * dy - 2 * omega * state.VelocityY) * elapsedSeconds;
-            double x = offset.X + state.VelocityX * elapsedSeconds;
-            double y = offset.Y + state.VelocityY * elapsedSeconds;
+            // If the real ScrollViewer offset changed independently since our last animation
+            // write, native thumb/content dragging or another owner has taken control. Cancel this
+            // spring instead of ever snapping the user's pointer back to a stale target.
+            if (Math.Abs(offset.X - state.LastAppliedX) > 0.1 || Math.Abs(offset.Y - state.LastAppliedY) > 0.1)
+            {
+                _smoothScrollStates.Remove(viewer);
+                continue;
+            }
             double maxX = Math.Max(0, viewer.Extent.Width - viewer.Viewport.Width);
             double maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
+
+            // Exact critically-damped integration avoids the explicit-Euler instability that
+            // can turn delayed frames/high-refresh input into visible scroll oscillation.
+            static (double Position, double Velocity) AdvanceAxis(double position, double target, double velocity, double dt, double spring)
+            {
+                double error = position - target;
+                double combined = velocity + spring * error;
+                double decay = Math.Exp(-spring * dt);
+                return (target + (error + combined * dt) * decay,
+                    (velocity - spring * combined * dt) * decay);
+            }
+            var (x, vx) = AdvanceAxis(offset.X, state.TargetX, state.VelocityX, elapsedSeconds, omega);
+            var (y, vy) = AdvanceAxis(offset.Y, state.TargetY, state.VelocityY, elapsedSeconds, omega);
+            state.VelocityX = vx;
+            state.VelocityY = vy;
             x = Math.Clamp(x, 0, maxX);
             y = Math.Clamp(y, 0, maxY);
             if (x <= 0 || x >= maxX) state.VelocityX = 0;
@@ -2241,15 +2447,23 @@ public partial class MainWindow : Window
                 && Math.Abs(state.VelocityX) < 3 && Math.Abs(state.VelocityY) < 3)
             {
                 viewer.Offset = new Vector(state.TargetX, state.TargetY);
+                state.LastAppliedX = state.TargetX;
+                state.LastAppliedY = state.TargetY;
                 _smoothScrollStates.Remove(viewer);
             }
-            else viewer.Offset = new Vector(x, y);
+            else
+            {
+                viewer.Offset = new Vector(x, y);
+                state.LastAppliedX = x;
+                state.LastAppliedY = y;
+            }
         }
     }
 
     private void KeepLyricInComfortBand(TextBlock line, ScrollViewer? viewer)
     {
-        if (viewer is null || viewer.Viewport.Height <= 1) return;
+        if (viewer is null || viewer.Viewport.Height <= 1 || _activeScrollBarDragPointer is not null
+            || _manuallyScrolledLyricViewers.Contains(viewer)) return;
         var origin = line.TranslatePoint(new Point(0, 0), viewer);
         if (origin is null) return;
         double y = origin.Value.Y;
@@ -2545,7 +2759,7 @@ public partial class MainWindow : Window
         bool albumSource = string.Equals(source.Kind, "album", StringComparison.OrdinalIgnoreCase);
         sourceLabel.Children.Add(new TextBlock { Text = albumSource ? "ALBUM SOURCE" : "PLAYLIST SOURCE", FontSize = 9, FontWeight = FontWeight.ExtraBold, Foreground = ResBrush("AccentBrush"), LetterSpacing = 0.65 });
         meta.Children.Add(sourceLabel);
-        meta.Children.Add(new TextBlock { Text = source.Title, FontSize = 12.5, FontWeight = FontWeight.Bold });
+        meta.Children.Add(new ScrollingTitleTextBlock { Text = source.Title, FontSize = 12.5, FontWeight = FontWeight.Bold });
         meta.Children.Add(new TextBlock { Text = source.IsLocal ? "Local playlist" : albumSource ? "YouTube Music album" : "YouTube Music playlist", FontSize = 10.5, Foreground = ResBrush("TextSecondaryBrush") });
         Grid.SetColumn(meta, 3);
         row.Children.Add(meta);
@@ -3149,6 +3363,12 @@ public partial class MainWindow : Window
         if (_activeNavKey != "home" || _loadingMoreHome || string.IsNullOrEmpty(_homeContinuation) || _homeShelvesContainer is null)
             return;
 
+        if (_activeScrollBarDragPointer is not null)
+        {
+            _homeContinuationPendingUntilDragEnds = true;
+            return;
+        }
+
         double maxOffset = CenterScrollViewer.Extent.Height - CenterScrollViewer.Viewport.Height;
         if (maxOffset > 40 && CenterScrollViewer.Offset.Y >= maxOffset - 360)
             await AppendNextHomeContinuationAsync();
@@ -3169,6 +3389,9 @@ public partial class MainWindow : Window
         try
         {
             var next = await _yt.GetHomeAsync(continuation: _homeContinuation);
+            // Extent changes resize/reposition the thumb. Hold the fetched page until the user
+            // releases a scrollbar thumb rather than changing its geometry mid-drag.
+            while (_activeScrollBarDragPointer is not null) await Task.Delay(60);
             _homeContinuation = next.Continuation;
 
             int added = 0;
@@ -3456,12 +3679,11 @@ public partial class MainWindow : Window
                     qRow.Children.Add(new Border { Width = 56, Height = 56, Background = ResBrush("BgSurfaceBrush"), Child = qImg });
 
                     var qMeta = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 8, 0), Spacing = 1, ClipToBounds = true };
-                    qMeta.Children.Add(new TextBlock
+                    qMeta.Children.Add(new ScrollingTitleTextBlock
                     {
                         Text = tr.Title,
                         FontSize = 13.5,
                         FontWeight = FontWeight.Bold,
-                        TextTrimming = TextTrimming.CharacterEllipsis,
                     });
                     qMeta.Children.Add(new TextBlock
                     {
@@ -3474,16 +3696,8 @@ public partial class MainWindow : Window
                     Grid.SetColumn(qMeta, 1);
                     qRow.Children.Add(qMeta);
 
-                    var playBadge = new Border
-                    {
-                        Width = 30,
-                        Height = 30,
-                        CornerRadius = new CornerRadius(15),
-                        Background = ResBrush("AccentBrush"),
-                        Margin = new Thickness(0, 0, 12, 0),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Child = new PathIcon { Data = Icons.Play, Width = 12, Height = 12, Foreground = ResBrush("OnAccentBrush") },
-                    };
+                    var playBadge = BuildCardPlayBadge(tr, 30);
+                    playBadge.Margin = new Thickness(0, 0, 12, 0);
                     Grid.SetColumn(playBadge, 2);
                     qRow.Children.Add(playBadge);
 
@@ -3597,12 +3811,11 @@ public partial class MainWindow : Window
             LetterSpacing = 1.0,
             Foreground = ResBrush("AccentBrush"),
         });
-        info.Children.Add(new TextBlock
+        info.Children.Add(new ScrollingTitleTextBlock
         {
             Text = mainTrack.Title,
             FontSize = 22,
             FontWeight = FontWeight.ExtraBold,
-            TextTrimming = TextTrimming.CharacterEllipsis,
         });
         info.Children.Add(new TextBlock
         {
@@ -3985,13 +4198,11 @@ public partial class MainWindow : Window
 
         var bottomRow = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,Auto"), Margin = new Thickness(0, 14, 0, 0) };
         var metaStack = new StackPanel { Spacing = 5, VerticalAlignment = VerticalAlignment.Bottom, ClipToBounds = true, Margin = new Thickness(0, 0, 10, 0) };
-        metaStack.Children.Add(new TextBlock
+        metaStack.Children.Add(new ScrollingTitleTextBlock
         {
             Text = titleText,
             FontSize = 20,
             FontWeight = FontWeight.ExtraBold,
-            MaxLines = 2,
-            TextTrimming = TextTrimming.CharacterEllipsis,
         });
 
         var subRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -4018,16 +4229,9 @@ public partial class MainWindow : Window
         metaStack.Children.Add(subRow);
         bottomRow.Children.Add(metaStack);
 
-        var bigPlayCircle = new Border
-        {
-            Width = 44,
-            Height = 44,
-            CornerRadius = new CornerRadius(22),
-            Background = ResBrush("AccentBrush"),
-            VerticalAlignment = VerticalAlignment.Bottom,
-            BoxShadow = BoxShadows.Parse("0 6 16 0 #55000000"),
-            Child = new PathIcon { Data = Icons.Play, Width = 17, Height = 17, Foreground = ResBrush("OnAccentBrush") },
-        };
+        var bigPlayCircle = BuildCardPlayBadge(topTrack, 44);
+        bigPlayCircle.VerticalAlignment = VerticalAlignment.Bottom;
+        bigPlayCircle.BoxShadow = BoxShadows.Parse("0 6 16 0 #55000000");
         Grid.SetColumn(bigPlayCircle, 1);
         bottomRow.Children.Add(bigPlayCircle);
 
@@ -4260,6 +4464,44 @@ public partial class MainWindow : Window
         return new Border { Width = size, Height = size, CornerRadius = new CornerRadius(Math.Max(3, size * 0.07)), ClipToBounds = true, Child = grid };
     }
 
+    private Border BuildCardPlayBadge(TrackItem? track, double size)
+    {
+        var playIcon = new PathIcon
+        {
+            Data = Icons.Play,
+            Width = size * 0.4,
+            Height = size * 0.4,
+            Foreground = ResBrush("OnAccentBrush"),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var spectrum = new SpectrumVisualizerControl
+        {
+            Width = size * 0.8,
+            Height = Math.Max(14, size * 0.44),
+            BarCount = 6,
+            BarColor = Colors.White,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsVisible = false,
+            IsHitTestVisible = false,
+        };
+        var content = new Grid { Width = size, Height = size };
+        content.Children.Add(playIcon);
+        content.Children.Add(spectrum);
+        if (track is not null)
+            _trackPlayIndicators.Add((new WeakReference<PathIcon>(playIcon), new WeakReference<SpectrumVisualizerControl>(spectrum), track.Id));
+        return new Border
+        {
+            Width = size,
+            Height = size,
+            CornerRadius = new CornerRadius(size / 2),
+            Background = ResBrush("AccentBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = content,
+        };
+    }
+
     private Button BuildIconActionButton(Geometry icon, string tip, Action action, bool accent = false, double size = 40)
     {
         var button = new Button
@@ -4346,14 +4588,27 @@ public partial class MainWindow : Window
             Dispatcher.UIThread.Post(() =>
             {
                 if (!header.IsVisible) return;
+                var rootColor = ThemeManager.GetPalette(_store.Settings.Theme).BgRoot;
+                Color FadeToRoot(double amount)
+                {
+                    amount = Math.Clamp(amount, 0, 1);
+                    return Color.FromRgb(
+                        (byte)Math.Round(color.R + (rootColor.R - color.R) * amount),
+                        (byte)Math.Round(color.G + (rootColor.G - color.G) * amount),
+                        (byte)Math.Round(color.B + (rootColor.B - color.B) * amount));
+                }
                 header.Background = new LinearGradientBrush
                 {
                     StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
                     GradientStops = new GradientStops
                     {
-                        new GradientStop(Color.FromArgb(188, color.R, color.G, color.B), 0),
-                        new GradientStop(Color.FromArgb(142, color.R, color.G, color.B), 0.62),
-                        new GradientStop(ThemeManager.GetPalette(_store.Settings.Theme).BgCard, 1),
+                        new GradientStop(FadeToRoot(0.00), 0.00),
+                        new GradientStop(FadeToRoot(0.08), 0.16),
+                        new GradientStop(FadeToRoot(0.22), 0.34),
+                        new GradientStop(FadeToRoot(0.48), 0.54),
+                        new GradientStop(FadeToRoot(0.73), 0.74),
+                        new GradientStop(FadeToRoot(0.92), 0.90),
+                        new GradientStop(rootColor, 1.00),
                     },
                 };
             });
@@ -4377,7 +4632,7 @@ public partial class MainWindow : Window
 
         var hdrBorder = new Border
         {
-            Background = ResBrush("BgCardBrush"),
+            Background = ResBrush("BgRootBrush"),
             CornerRadius = new CornerRadius(12),
             Padding = new Thickness(22),
         };
@@ -4788,14 +5043,13 @@ public partial class MainWindow : Window
             Foreground = new SolidColorBrush(Color.FromArgb(185, 255, 255, 255)),
             LetterSpacing = 0.6,
         });
-        caption.Children.Add(new TextBlock
+        caption.Children.Add(new ScrollingTitleTextBlock
         {
             Text = card.Title,
             FontSize = 14,
             FontWeight = FontWeight.ExtraBold,
             Foreground = Brushes.White,
-            TextWrapping = TextWrapping.Wrap,
-            MaxLines = 2,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
         });
         grid.Children.Add(caption);
         return new Border
@@ -4885,7 +5139,7 @@ public partial class MainWindow : Window
             });
             var moodText = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Spacing = 2 };
             moodText.Children.Add(new TextBlock { Text = "MOOD  /  GENRE", FontSize = 8.5, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Color.FromArgb(210, 255, 255, 255)), LetterSpacing = 0.7 });
-            moodText.Children.Add(new TextBlock { Text = card.Title, FontSize = 15, FontWeight = FontWeight.ExtraBold, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap, MaxLines = 2 });
+            moodText.Children.Add(new ScrollingTitleTextBlock { Text = card.Title, FontSize = 15, FontWeight = FontWeight.ExtraBold, Foreground = Brushes.White });
             moodArt.Children.Add(moodText);
             border.Child = WithSoftHover(moodArt);
             border.PointerPressed += async (_, _) =>
@@ -4932,15 +5186,23 @@ public partial class MainWindow : Window
             };
         }
         st.Children.Add(artTile);
-        st.Children.Add(new TextBlock
-        {
-            Text = card.Title,
-            FontSize = 13.5,
-            FontWeight = FontWeight.Bold,
-            MaxLines = 1,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            TextAlignment = card.Kind == "artist" ? TextAlignment.Center : TextAlignment.Left,
-        });
+        if (card.Kind == "artist")
+            st.Children.Add(new TextBlock
+            {
+                Text = card.Title,
+                FontSize = 13.5,
+                FontWeight = FontWeight.Bold,
+                MaxLines = 1,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                TextAlignment = TextAlignment.Center,
+            });
+        else
+            st.Children.Add(new ScrollingTitleTextBlock
+            {
+                Text = card.Title,
+                FontSize = 13.5,
+                FontWeight = FontWeight.Bold,
+            });
         st.Children.Add(new TextBlock
         {
             Text = string.IsNullOrEmpty(card.Subtitle) ? card.Kind : card.Subtitle,
@@ -5924,23 +6186,107 @@ public partial class MainWindow : Window
         if (string.IsNullOrWhiteSpace(urlOrPath)) return;
         target.Transitions = null;
         target.Opacity = 1;
-        Dispatcher.UIThread.Post(() =>
+        if (_deferredArtwork.Remove(target, out var old)) RemoveDeferredArtworkFromTracker(target, old);
+        var state = new DeferredArtworkLoad { Url = urlOrPath, Fallback = fallback };
+        _deferredArtwork[target] = state;
+        state.DetachHandler = (_, _) =>
         {
-            if (target.Source is not null) return;
-            if (target.Parent is Control) StartImageLoadingShimmer(target);
-            else
-            {
-                EventHandler<VisualTreeAttachmentEventArgs>? attached = null;
-                attached = (_, _) =>
-                {
-                    target.AttachedToVisualTree -= attached;
-                    if (target.Source is null) StartImageLoadingShimmer(target);
-                };
-                target.AttachedToVisualTree += attached;
-            }
-        }, DispatcherPriority.Background);
+            if (!_deferredArtwork.Remove(target, out var removed)) return;
+            RemoveDeferredArtworkFromTracker(target, removed);
+            if (removed.AttachHandler is not null) target.AttachedToVisualTree -= removed.AttachHandler;
+            if (removed.DetachHandler is not null) target.DetachedFromVisualTree -= removed.DetachHandler;
+        };
+        target.DetachedFromVisualTree += state.DetachHandler;
 
-        _ = LoadImageIntoAsync(target, urlOrPath, fallback);
+        if (target.GetVisualRoot() is not null)
+        {
+            BeginOrDeferArtworkLoad(target, state);
+            return;
+        }
+        state.AttachHandler = (_, _) =>
+        {
+            if (state.AttachHandler is not null) target.AttachedToVisualTree -= state.AttachHandler;
+            state.AttachHandler = null;
+            if (_deferredArtwork.TryGetValue(target, out var current) && ReferenceEquals(current, state))
+                BeginOrDeferArtworkLoad(target, state);
+        };
+        target.AttachedToVisualTree += state.AttachHandler;
+    }
+
+    private void BeginOrDeferArtworkLoad(Image target, DeferredArtworkLoad state)
+    {
+        if (!_deferredArtwork.TryGetValue(target, out var current) || !ReferenceEquals(current, state)) return;
+        state.Viewer = target.GetVisualAncestors().OfType<ScrollViewer>().FirstOrDefault();
+        if (state.Viewer is null || IsArtworkNearViewport(target, state.Viewer))
+        {
+            StartDeferredArtworkLoad(target, state);
+            return;
+        }
+
+        if (!_deferredArtworkTrackers.TryGetValue(state.Viewer, out var tracker))
+        {
+            var viewer = state.Viewer;
+            var timer = new DispatcherTimer(TimeSpan.FromMilliseconds(100), DispatcherPriority.Background, (_, _) =>
+            {
+                if (!_deferredArtworkTrackers.TryGetValue(viewer, out var active)) return;
+                active.Timer.Stop();
+                foreach (var image in active.Pending.ToArray())
+                {
+                    if (!_deferredArtwork.TryGetValue(image, out var pending) || !ReferenceEquals(pending.Viewer, viewer))
+                    {
+                        active.Pending.Remove(image);
+                        continue;
+                    }
+                    if (IsArtworkNearViewport(image, viewer)) StartDeferredArtworkLoad(image, pending);
+                }
+                if (active.Pending.Count == 0) RemoveDeferredArtworkTracker(viewer, active);
+            });
+            EventHandler<ScrollChangedEventArgs> onScroll = (_, _) =>
+            {
+                if (!timer.IsEnabled) timer.Start();
+            };
+            tracker = new DeferredArtworkTracker { ScrollHandler = onScroll, Timer = timer };
+            _deferredArtworkTrackers[viewer] = tracker;
+            viewer.ScrollChanged += onScroll;
+        }
+        tracker.Pending.Add(target);
+    }
+
+    private static bool IsArtworkNearViewport(Image image, ScrollViewer viewer)
+    {
+        if (!image.IsVisible || viewer.Viewport.Width <= 1 || viewer.Viewport.Height <= 1) return false;
+        if (image.Bounds.Width <= 0 || image.Bounds.Height <= 0) return true;
+        var origin = image.TranslatePoint(new Point(0, 0), viewer);
+        if (origin is null) return false;
+        // Start a little before an item enters the visible area to avoid pop-in, but leave
+        // far-away shelves/results unloaded until the user approaches them.
+        var prefetch = new Rect(-viewer.Viewport.Width * 0.5, -viewer.Viewport.Height * 0.35,
+            viewer.Viewport.Width * 2, viewer.Viewport.Height * 1.7);
+        return new Rect(origin.Value.X, origin.Value.Y, image.Bounds.Width, image.Bounds.Height).Intersects(prefetch);
+    }
+
+    private void StartDeferredArtworkLoad(Image target, DeferredArtworkLoad state)
+    {
+        if (!_deferredArtwork.Remove(target)) return;
+        RemoveDeferredArtworkFromTracker(target, state);
+        if (state.AttachHandler is not null) target.AttachedToVisualTree -= state.AttachHandler;
+        if (state.DetachHandler is not null) target.DetachedFromVisualTree -= state.DetachHandler;
+        StartImageLoadingShimmer(target);
+        _ = LoadImageIntoAsync(target, state.Url, state.Fallback);
+    }
+
+    private void RemoveDeferredArtworkFromTracker(Image image, DeferredArtworkLoad state)
+    {
+        if (state.Viewer is null || !_deferredArtworkTrackers.TryGetValue(state.Viewer, out var tracker)) return;
+        tracker.Pending.Remove(image);
+        if (tracker.Pending.Count == 0) RemoveDeferredArtworkTracker(state.Viewer, tracker);
+    }
+
+    private void RemoveDeferredArtworkTracker(ScrollViewer viewer, DeferredArtworkTracker tracker)
+    {
+        viewer.ScrollChanged -= tracker.ScrollHandler;
+        tracker.Timer.Stop();
+        _deferredArtworkTrackers.Remove(viewer);
     }
 
     private async Task LoadImageIntoAsync(Image target, string? urlOrPath, Control? fallback)
@@ -6015,7 +6361,7 @@ public partial class MainWindow : Window
     private void StartImageLoadingShimmer(Image target)
     {
         if (_imageShimmers.ContainsKey(target) || target.Source is not null) return;
-        if (IsResourceSaverActive)
+        if (IsResourceSaverActive || !IsForegroundVisible)
         {
             Control? staticParent = target.Parent as Control;
             while (staticParent is not null && staticParent is not Border) staticParent = staticParent.Parent as Control;
@@ -6051,7 +6397,7 @@ public partial class MainWindow : Window
             StartedUtc = DateTime.UtcNow,
         };
         EnsureImageShimmerTimer();
-        if (IsVisible && WindowState != WindowState.Minimized && !_imageShimmerTimer!.IsEnabled)
+        if (IsForegroundVisible && !_imageShimmerTimer!.IsEnabled)
             _imageShimmerTimer.Start();
     }
 
