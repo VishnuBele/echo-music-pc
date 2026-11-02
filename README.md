@@ -1,49 +1,120 @@
-# Echo Music
+<div align="center">
+  <img src="https://raw.githubusercontent.com/VishnuBele/echo-music-pc/main/Assets/echo-logo.png" alt="Echo Music logo" width="116">
 
-Echo Music is my native desktop music player for **Windows 10/11** and **64-bit Linux**. I built it around a simple idea: a full-featured music player should work in Guest Mode, feel at home on a PC, and keep the controls and settings easy to find.
+  <h1>Echo Music PC</h1>
+  <p><strong>Your music. Your desktop. Your controls.</strong></p>
+  <p>A feature-rich native music player for Windows 10/11 and 64-bit Linux.</p>
 
-**Made by V!SHNU · GPL-3.0**
+  [![Latest release](https://img.shields.io/github/v/release/VishnuBele/echo-music-pc?style=for-the-badge&label=latest%20release)](https://github.com/VishnuBele/echo-music-pc/releases)
+  [![License](https://img.shields.io/badge/license-GPL--3.0-2ea44f?style=for-the-badge)](LICENSE.txt)
+  [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-6c63ff?style=for-the-badge)](#platform-support)
+  [![Built with Avalonia](https://img.shields.io/badge/UI-Avalonia-8b5cf6?style=for-the-badge)](https://avaloniaui.net/)
+
+  **[Download Echo Music](https://github.com/VishnuBele/echo-music-pc/releases) · [What's new in v2.0.4](RELEASE-NOTES-v2.0.4.md) · [Linux guide](README-LINUX.md) · [License](LICENSE.txt)**
+
+  <sub>Created and maintained by <strong>V!SHNU</strong> · Open source · GPL-3.0</sub>
+</div>
+
+---
+
+## One player. A lot more room to listen.
+
+Echo Music PC brings music discovery, streaming, synced lyrics, local listening and desktop controls together in one native app. Open it in **Guest Mode** and start listening—an account is not required for the core experience.
+
+Built for the desktop: a proper library, queue, keyboard shortcuts, mini-player, full-screen player and audio controls that go beyond play and pause.
+
+## Explore what you can do
+
+| | | |
+|:---:|---|---|
+| 🔎 | **Discover music** | Search, suggestions, recommendations, charts, artists, albums, playlists, related tracks, mood/genre browsing and Music Flow. |
+| 🎤 | **Follow the lyrics** | Synced lyrics, timing adjustments, translation/romanization options and a dedicated full-screen lyrics experience. Video uploads can use captions tied to the exact YouTube video instead of borrowing lyrics from a different recording. |
+| 🎧 | **Shape the sound** | 10-band equalizer and presets, playback speed with pitch-lock processing, volume normalization, crossfade and additional audio effects. |
+| 📚 | **Keep your music close** | Local music, liked tracks, playlists, listening History, album and playlist History, offline downloads and Echo Wrapped. |
+| 🔁 | **Bring playlists with you** | Import public Spotify playlists, albums, tracks and public profiles, plus public YouTube Music playlists and individual song/video links. Local CSV/M3U/M3U8 files are supported too. |
+| 🎨 | **Make it yours** | Themes, content filters, typography options, four seek-bar styles, Low / Auto / High performance modes and a customizable desktop layout. |
+| 🖥️ | **Connect your desktop** | Keyboard shortcuts, compact mini-player, Command Palette, optional Discord Rich Presence and Windows media-session controls. |
+
+### Playback and library
+
+- Play streamed tracks or music stored on your computer.
+- Manage the queue, liked songs and personal playlists.
+- Save supported tracks for offline playback.
+- Browse listening History, including album and playlist sessions.
+- Use shuffle, repeat, seeking, playback-speed and volume controls.
+
+### Lyrics that respect the recording
+
+Echo Music can retrieve timed lyrics from multiple sources. For music videos and longer uploads, the exact-video lookup path checks captions associated with that video's ID and preserves their timing. When a matching timed source is unavailable, Echo Music avoids confidently presenting lyrics from an unrelated version of the track.
+
+Lyrics availability still depends on what the source exposes. Some videos have no usable captions, and word-level timing is not guaranteed for every song.
+
+### Audio controls
+
+- 10-band EQ with presets.
+- Playback-speed control with pitch-preserving processing.
+- Volume normalization and crossfade.
+- Additional DSP effects and track-to-track processing-state cleanup.
+
+## What's new in v2.0.4
+
+This release focuses on **large-library responsiveness, artwork efficiency and playback reliability**, with improvements to playlist importing and the Windows setup experience.
+
+| Area | v2.0.4 improvements |
+|---|---|
+| **Large playlists** | Long playlist detail pages virtualize track rows around the visible area instead of keeping every row active at once. Track order, filtering and playback actions remain available. |
+| **Artwork loading** | Artwork requests are deferred until cards approach the viewport. Ordinary cards use right-sized thumbnails; high-resolution artwork is reserved for the large Now Playing presentation. |
+| **Resource Saver** | Reduces nonessential visual work, artwork decoding/cache usage, concurrent image work and stream prefetching. Audio playback and low-rate background maintenance continue. |
+| **Playback recovery** | Distinguishes a real track ending from a stream or decoder failure. Premature cutoffs trigger a refreshed stream retry; persistent failures pause playback instead of silently advancing the queue. Seek and playback positions are bounded by known track duration. |
+| **Playlist importing** | Adds public YouTube Music playlist and individual song/video URL importing. Spotify matching is more selective about title, artist, duration and version differences such as live or remix recordings. |
+| **Windows setup** | Detects an existing per-user installation, preselects its install location and labels the action as an update when applicable. |
+
+See the **[v2.0.4 release notes](RELEASE-NOTES-v2.0.4.md)** for implementation details and validation limitations.
+
+## Performance, without the mystery settings
+
+Echo Music includes **Low**, **Auto** and **High** animation modes. These select internal animation update targets (approximately 30, 60 and up to 120 updates per second); they do not change your monitor's refresh rate or promise a particular FPS. Actual smoothness depends on the display, GPU, operating system, desktop compositor and current workload.
+
+**Resource Saver** reduces controllable background costs, including artwork decode size, in-memory artwork-cache capacity, simultaneous artwork requests, stream prefetching and nonessential visual activity. In **Auto** mode, reduced visual work can activate while Echo Music is not the foreground app. Audio playback and essential background maintenance continue. The goal is to reduce unnecessary work—not to promise a fixed RAM figure.
 
 ## Download and install
 
-Download the current release from the [Echo Music releases page](https://github.com/VishnuBele/echo-music-pc/releases).
+Get the available builds from the **[GitHub Releases page](https://github.com/VishnuBele/echo-music-pc/releases)**. Choose the package for your system and architecture.
 
-### Windows 10/11
+### Windows 10/11 · x64
 
-1. Download `EchoMusic-Setup-v2.0.4-x64.exe` from the release assets.
-2. Open it and follow the setup screens. It installs for your Windows user and includes the .NET runtime; you do not need to install .NET separately or use an administrator account.
+1. Download **`EchoMusic-Setup-v2.0.4-x64.exe`** from the v2.0.4 release assets.
+2. Run the installer and follow the prompts. Installation is per-user; the packaged Windows build includes its .NET runtime, so a separate .NET installation is not normally needed.
 
-The installer is **unsigned**. Windows SmartScreen or antivirus software may display a warning. Check that the file came from the official release and verify its SHA-256 before opening it. I never ask you to turn off antivirus protection.
+The installer is **unsigned**. Windows SmartScreen or antivirus software may show a reputation warning. Verify that the installer came from this repository and compare its SHA-256 checksum when one is published. **Do not disable antivirus protection** to install the app.
 
-### Linux (x86-64)
+### Linux · x86-64
 
-1. Download and extract `EchoMusic-Linux-v2.0.4-x64.tar.gz`.
-2. Open a terminal in the extracted folder and run:
+1. Download **`EchoMusic-Linux-v2.0.4-x64.tar.gz`** from the v2.0.4 release assets.
+2. Extract the archive.
+3. Open a terminal in the extracted folder and run:
 
    ```sh
    chmod +x install.sh
    ./install.sh
    ```
 
-The installer adds a per-user copy and an application-menu shortcut. This compact package requires the .NET 8 runtime (`Microsoft.NETCore.App` 8.0); the installer checks for it. Your desktop also needs its usual graphics and audio libraries. The package is for x86-64 Linux, not ARM64. See `README-LINUX.md` for the self-contained build option.
+The compact Linux package is framework-dependent and requires the **.NET 8 runtime** (`Microsoft.NETCore.App` 8.0), plus the usual graphics and audio libraries supplied by your distribution. The installer checks for .NET 8 before installing. It installs under your home directory and does not need administrator privileges.
 
-## What I built into Echo Music
+To uninstall the per-user Linux installation:
 
-- Search, browse recommendations, charts, albums, artists, playlists and related music.
-- Synced lyrics, lyric timing controls, translation options and a fullscreen player.
-- Guest Mode, local music, playlist management, public Spotify and YouTube Music imports, and offline downloads.
-- A 10-band equalizer, presets, playback speed, volume normalization, crossfade and other playback controls.
-- Themes, content filters, keyboard shortcuts, a mini-player, the Command Palette and Echo Wrapped.
-- Optional Discord Rich Presence and optional Google sign-in on Windows for YouTube Music features.
+```sh
+~/.local/opt/echo-music/uninstall.sh
+```
 
-Spotify import accepts public playlists, albums, tracks, and public profiles; YouTube Music import accepts public playlists and single song/video links. YouTube channel/profile browsing, private playlists, and YouTube auto-mix/radio links are not supported by the importer. Local CSV/M3U files also work. These import paths do not ask for Spotify credentials or OAuth. Google sign-in is optional, is not an official Google OAuth integration, and does not provide access to a full YouTube Music library, listening history, Recaps or personalized Home feed. Linux stays in Guest Mode.
+See [README-LINUX.md](README-LINUX.md) for Linux-specific details and the self-contained packaging option. This package targets **x86-64**, not ARM64.
 
 ## Keyboard shortcuts
 
-Shortcuts that use a single letter are available when a text field is not focused.
+Single-letter shortcuts work when a text field is not focused.
 
 | Keys | Action |
-| --- | --- |
+|---|---|
 | `Space` | Play or pause |
 | `←` / `→` | Seek 5 seconds backward or forward |
 | `Ctrl` + `←` / `→` | Previous or next track |
@@ -60,20 +131,42 @@ Shortcuts that use a single letter are available when a text field is not focuse
 | `Alt` + `←` / `→` | Go back or forward in navigation history |
 | `Esc` | Close the topmost dialog or fullscreen player; clear search when applicable |
 
-## About this release — v2.0.4
+## Platform support
 
-This release virtualizes large playlist rows and Home shelf cards without removing any content, reduces background artwork and visual work in Resource Saver, uses right-sized thumbnails for cards and max-resolution art for Now Playing, and improves playlist editing and cover previews. Playback duration bounds and stream-recovery protections are retained. See `RELEASE-NOTES-v2.0.4.md` for validation limits.
+| Feature | Windows 10/11 x64 | Linux x86-64 |
+|---|:---:|:---:|
+| Core player, search and library | ✓ | ✓ |
+| Guest Mode | ✓ | ✓ |
+| Synced lyrics and video-caption lookup | ✓ | ✓ |
+| Local music and playlists | ✓ | ✓ |
+| Equalizer and playback DSP | ✓ | ✓ |
+| Discord Rich Presence | ✓ | ✓ |
+| Windows media-session controls | ✓ | — |
+| Optional Google sign-in integration | ✓ | — |
 
-## Privacy and local data
+Linux stays in Guest Mode. Windows-specific integrations, including Windows media-session controls and the optional Google sign-in flow, are not included in the Linux edition. Linux audio-device behaviour can vary with the distribution and its ALSA/PulseAudio/PipeWire configuration.
 
-You can use Echo Music without signing in. On Windows, optional sign-in data is protected for your Windows user at rest, but that does not protect an active session from every malware or session-hijacking risk. Use Guest Mode if you do not want to sign in, and review or revoke active sessions in your Google Account security settings when needed.
+## Accounts, privacy and local data
 
-Echo Music stores its settings, playlists, cached artwork, downloads and other local data in your user profile. The app does not disable antivirus software.
-
-## Platform notes
-
-I develop and test Echo Music on Windows. Linux shares the core player and library code, but some Windows integrations are unavailable there; audio-device behavior also depends on the Linux distribution and desktop audio stack. Windows media-session features and Google sign-in are Windows-only. The two editions share the same core experience but are not identical.
+- **Guest Mode:** the core player does not require an account.
+- **Spotify import:** public playlist, album, track and profile links are supported; profile links expose public playlists. No Spotify password or OAuth flow is requested.
+- **YouTube Music import:** public playlist links and individual song/video links are supported. Channel/profile browsing, private playlists and auto-mix/radio links are not supported by the importer.
+- **Windows sign-in:** optional Google sign-in is available for some YouTube Music web features through a cookie-based integration. It is not an official Google OAuth integration and does not provide full YouTube Music library sync, listening history, Recaps or a personalized Home feed.
+- **Linux:** remains in Guest Mode; Windows-only account and media-session integrations are unavailable.
+- **Local data:** settings, playlists, cached artwork, downloads and other app data are stored in your user profile. Optional Windows sign-in data is protected for the Windows user at rest, but an active session cannot be guaranteed safe from every malware or session-hijacking risk.
 
 ## Credits and license
 
-Echo Music PC is made by **V!SHNU** and released under the **GNU General Public License v3.0**. See `LICENSE.txt` and the About section in the app for attribution and license details.
+Echo Music PC is created and maintained by **V!SHNU**, and released under the **GNU General Public License v3.0**. See [LICENSE.txt](LICENSE.txt) for the full license and attribution.
+
+This PC edition is based on the Echo Music project lineage and remains separately maintained for desktop use. See the [original Echo Music Android project](https://github.com/EchoMusicApp/Echo-Music) for its own source and project information.
+
+---
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/VishnuBele/echo-music-pc/main/Assets/echo-logo.png" alt="Echo Music" width="42">
+  <br>
+  <strong>Made by V!SHNU</strong>
+  <br>
+  <sub>Your music. Your desktop. Your controls. · GPL-3.0</sub>
+</div>
