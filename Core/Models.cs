@@ -236,6 +236,9 @@ public sealed class LocalPlaylist
     public string Source { get; set; } = "Local";
     public string SpotifySourceId { get; set; } = "";
     public string CustomCoverPath { get; set; } = "";
+    // Percentage of the maximum corner radius (0 = square, 100 = circular).
+    // 14 preserves the legacy size * 0.07 appearance for existing playlists.
+    public double CoverRoundness { get; set; } = 14;
     public List<TrackItem> Tracks { get; set; } = new();
     public long CreatedAt { get; set; }
     public long UpdatedAt { get; set; }

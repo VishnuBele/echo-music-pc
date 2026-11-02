@@ -16,8 +16,8 @@ public static class ImageCache
     private static readonly SemaphoreSlim NetworkImageSlots = new(4, 4);
     private static readonly SemaphoreSlim SaverImageSlots = new(2, 2);
     private static readonly ConcurrentDictionary<string, Lazy<Task<Bitmap?>>> Inflight = new(StringComparer.Ordinal);
-    private static readonly Regex VideoThumbRegex = new(@"/vi/([A-Za-z0-9_-]{11})/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static int _memCapacity = 40;
+    private static readonly Regex VideoThumbRegex = new(@"/(vi(?:_webp)?)/([A-Za-z0-9_-]{11})/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static int _memCapacity = 24;
     private static volatile bool _resourceSaver;
 
     public static void SetResourceSaver(bool enabled)
@@ -26,7 +26,7 @@ public static class ImageCache
         ResourceSaverState.IsActive = enabled;
         lock (MemLock)
         {
-            _memCapacity = enabled ? 10 : 40;
+            _memCapacity = enabled ? 8 : 24;
             TrimMemoryCache();
         }
     }
@@ -51,12 +51,13 @@ public static class ImageCache
         }
     }
 
-    public static async Task<Bitmap?> LoadAsync(string? urlOrPath, HttpClient http, string cacheDir)
+    public static async Task<Bitmap?> LoadAsync(string? urlOrPath, HttpClient http, string cacheDir, int decodeWidth = 384)
     {
         if (string.IsNullOrWhiteSpace(urlOrPath)) return null;
+        int effectiveDecodeWidth = Math.Clamp(_resourceSaver ? Math.Min(256, decodeWidth) : decodeWidth, 64, 2048);
         foreach (var candidate in GetCandidates(urlOrPath))
         {
-            var bmp = await LoadOneAsync(candidate, http, cacheDir).ConfigureAwait(false);
+            var bmp = await LoadOneAsync(candidate, http, cacheDir, effectiveDecodeWidth).ConfigureAwait(false);
             if (bmp is not null) return bmp;
         }
         return null;
@@ -67,36 +68,39 @@ public static class ImageCache
         yield return path;
         var match = VideoThumbRegex.Match(path);
         if (!match.Success) yield break;
-        var id = match.Groups[1].Value;
-        foreach (var quality in new[] { "hqdefault", "maxresdefault", "sddefault", "mqdefault", "default" })
+        var route = match.Groups[1].Value;
+        var id = match.Groups[2].Value;
+        var extension = route.Equals("vi_webp", StringComparison.OrdinalIgnoreCase) ? ".webp" : ".jpg";
+        foreach (var quality in new[] { "maxresdefault", "hqdefault", "sddefault", "mqdefault", "default" })
         {
-            var fallback = $"https://i.ytimg.com/vi/{id}/{quality}.jpg";
+            var fallback = $"https://i.ytimg.com/{route}/{id}/{quality}{extension}";
             if (!string.Equals(fallback, path, StringComparison.OrdinalIgnoreCase)) yield return fallback;
         }
     }
 
-    private static async Task<Bitmap?> LoadOneAsync(string key, HttpClient http, string cacheDir)
+    private static async Task<Bitmap?> LoadOneAsync(string key, HttpClient http, string cacheDir, int decodeWidth)
     {
-        var mem = TryGetMemory(key);
+        string memoryKey = $"{decodeWidth}:{key}";
+        var mem = TryGetMemory(memoryKey);
         if (mem is not null) return mem;
-        var lazy = Inflight.GetOrAdd(key, k => new Lazy<Task<Bitmap?>>(
-            () => LoadCoreAsync(k, http, cacheDir), LazyThreadSafetyMode.ExecutionAndPublication));
+        var lazy = Inflight.GetOrAdd(memoryKey, _ => new Lazy<Task<Bitmap?>>(
+            () => LoadCoreAsync(key, memoryKey, decodeWidth, http, cacheDir), LazyThreadSafetyMode.ExecutionAndPublication));
         try { return await lazy.Value.ConfigureAwait(false); }
         finally
         {
-            if (Inflight.TryGetValue(key, out var current) && ReferenceEquals(current, lazy))
-                Inflight.TryRemove(key, out _);
+            if (Inflight.TryGetValue(memoryKey, out var current) && ReferenceEquals(current, lazy))
+                Inflight.TryRemove(memoryKey, out _);
         }
     }
 
-    private static async Task<Bitmap?> LoadCoreAsync(string key, HttpClient http, string cacheDir)
+    private static async Task<Bitmap?> LoadCoreAsync(string key, string memoryKey, int decodeWidth, HttpClient http, string cacheDir)
     {
         Bitmap? TryDecode(byte[] bytes)
         {
             try
             {
                 using var ms = new MemoryStream(bytes, writable: false);
-                return Bitmap.DecodeToWidth(ms, _resourceSaver ? 256 : 384);
+                return Bitmap.DecodeToWidth(ms, decodeWidth);
             }
             catch { return null; }
         }
@@ -106,7 +110,7 @@ public static class ImageCache
             try
             {
                 var local = TryDecode(await File.ReadAllBytesAsync(key).ConfigureAwait(false));
-                if (local is not null) return AddToMemory(key, local);
+                if (local is not null) return AddToMemory(memoryKey, local);
             }
             catch { }
             try { File.Delete(key); } catch { }
@@ -121,7 +125,7 @@ public static class ImageCache
             try
             {
                 var cached = TryDecode(await File.ReadAllBytesAsync(diskPath).ConfigureAwait(false));
-                if (cached is not null) return AddToMemory(key, cached);
+                if (cached is not null) return AddToMemory(memoryKey, cached);
             }
             catch { }
             try { File.Delete(diskPath); } catch { }
@@ -167,7 +171,7 @@ public static class ImageCache
                 File.Move(temp, diskPath, overwrite: true);
             }
             catch { }
-            return AddToMemory(key, bmp);
+            return AddToMemory(memoryKey, bmp);
         }
         catch { return null; }
     }

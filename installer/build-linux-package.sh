@@ -3,9 +3,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_ROOT="${BUILD_ROOT:-${TMPDIR:-/tmp}/echomusic-linux-package}"
+APP_VERSION="${APP_VERSION:-2.0.4}"
+SELF_CONTAINED="${SELF_CONTAINED:-false}"
 PUBLISH_DIR="$BUILD_ROOT/publish-linux-x64"
-BUNDLE_DIR="$BUILD_ROOT/EchoMusic-Linux-v2.0.3-x64"
-OUT_ARCHIVE="${OUT_ARCHIVE:-$HOME/EchoMusic-Linux-v2.0.3-x64.tar.gz}"
+BUNDLE_DIR="$BUILD_ROOT/EchoMusic-Linux-v${APP_VERSION}-x64"
+OUT_ARCHIVE="${OUT_ARCHIVE:-$HOME/EchoMusic-Linux-v${APP_VERSION}-x64.tar.gz}"
 DOTNET_BIN="${DOTNET_BIN:-dotnet}"
 
 rm -rf "$PUBLISH_DIR" "$BUNDLE_DIR"
@@ -21,6 +23,7 @@ cp -a "$PUBLISH_DIR/." "$BUNDLE_DIR/"
 mkdir -p "$BUNDLE_DIR/Assets"
 cp "$PROJECT_DIR/Assets/echo-logo.png" "$BUNDLE_DIR/Assets/echo-logo.png"
 cp "$SCRIPT_DIR/linux/install.sh" "$SCRIPT_DIR/linux/uninstall.sh" "$PROJECT_DIR/README-LINUX.md" "$BUNDLE_DIR/"
+if [[ "$SELF_CONTAINED" == "true" ]]; then touch "$BUNDLE_DIR/.self-contained"; fi
 chmod +x "$BUNDLE_DIR/EchoMusic" "$BUNDLE_DIR/install.sh" "$BUNDLE_DIR/uninstall.sh"
 find "$BUNDLE_DIR" -type f \( -name '*.pdb' -o -name '*.xml' \) -delete
 mkdir -p "$(dirname "$OUT_ARCHIVE")"

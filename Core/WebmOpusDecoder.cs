@@ -35,6 +35,7 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
     private long _clusterEndPos = long.MaxValue;
     private double _currentPositionSec;
     private bool _eof;
+    private bool _hasDecodedAudio;
 
     private float[] _pcmRing = new float[MaxOpusFrameSamples * OutputChannels * 4];
     private int _pcmReadIdx;
@@ -95,10 +96,12 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
             }
             else
             {
-                if (size < 0 || _stream.Position + size > _stream.Length) break;
+                if (size < 0 || _stream.Position + size > _stream.Length)
+                    throw new InvalidDataException($"Invalid WebM element size at byte {elemStart}.");
                 SkipBytes(size);
             }
         }
+        throw new InvalidDataException("The WebM stream ended before its first audio cluster.");
     }
 
     private void ParseInfo(long endPos)
@@ -295,8 +298,11 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
                     continue;
                 }
 
-                if (_eof || !DecodeNextPacket())
+                if (_eof) break;
+                if (!DecodeNextPacket())
                 {
+                    if (!_hasDecodedAudio && _stream.Length > _firstClusterOffset)
+                        throw new InvalidDataException("The WebM stream ended without a decodable Opus audio frame.");
                     _eof = true;
                     break;
                 }
@@ -313,7 +319,11 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
                 _clusterEndPos = long.MaxValue;
 
             if (!TryReadElementHeader(out ulong id, out long size))
+            {
+                if (_stream.Position < _stream.Length)
+                    throw new InvalidDataException($"Malformed WebM element header at byte {_stream.Position}.");
                 return false;
+            }
 
             if (id == 0x1F43B675) // Cluster
             {
@@ -334,11 +344,8 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
             {
                 long blockEnd = _stream.Position + size;
                 if (size <= 4 || blockEnd > _stream.Length)
-                {
-                    SkipBytes(Math.Max(0, size));
-                    continue;
-                }
-                var block = ReadExact((int)size);
+                    throw new InvalidDataException($"Truncated or invalid WebM audio block at byte {_stream.Position}.");
+                var block = ReadExact(checked((int)size));
                 DecodeBlockBytes(block);
                 if (_pcmCount > 0) return true;
                 continue;
@@ -346,7 +353,7 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
 
             // Skip any other metadata / cues / void elements encountered mid-stream
             if (size < 0 || _stream.Position + size > _stream.Length)
-                return false;
+                throw new InvalidDataException($"Truncated WebM element at byte {_stream.Position}.");
             SkipBytes(size);
         }
         return false;
@@ -449,6 +456,7 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
         {
             int samplesPerCh = _decoder.Decode(packet, _decodeScratch, MaxOpusFrameSamples, false);
             if (samplesPerCh <= 0) return;
+            _hasDecodedAudio = true;
 
             int skipPerCh = 0;
             if (_preSkipSamples > 0)
@@ -514,29 +522,33 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
     {
         id = 0;
         size = 0;
+        if (_stream.Position >= _stream.Length) return false;
+        long headerStart = _stream.Position;
         int b0 = _stream.ReadByte();
-        if (b0 <= 0) return false;
+        if (b0 < 0) throw new EndOfStreamException($"Unexpected EOF in WebM element ID at byte {headerStart}.");
+        if (b0 == 0) throw new InvalidDataException($"Invalid WebM element ID at byte {headerStart}.");
         int idLen = LeadingZeroCountByte((byte)b0) + 1;
-        if (idLen > 4) return false;
+        if (idLen > 4) throw new InvalidDataException($"Invalid WebM element ID length at byte {headerStart}.");
         id = (ulong)b0;
         for (int i = 1; i < idLen; i++)
         {
             int bi = _stream.ReadByte();
-            if (bi < 0) return false;
+            if (bi < 0) throw new EndOfStreamException($"Truncated WebM element ID at byte {headerStart}.");
             id = (id << 8) | (ulong)(byte)bi;
         }
 
         int s0 = _stream.ReadByte();
-        if (s0 <= 0) return false;
+        if (s0 < 0) throw new EndOfStreamException($"Truncated WebM element size at byte {headerStart}.");
+        if (s0 == 0) throw new InvalidDataException($"Invalid WebM element size at byte {headerStart}.");
         int sLen = LeadingZeroCountByte((byte)s0) + 1;
-        if (sLen > 8) return false;
+        if (sLen > 8) throw new InvalidDataException($"Invalid WebM element size length at byte {headerStart}.");
         ulong mask = (ulong)(0xFF >> sLen);
         ulong val = (ulong)(byte)s0 & mask;
         ulong allOnes = mask;
         for (int i = 1; i < sLen; i++)
         {
             int bi = _stream.ReadByte();
-            if (bi < 0) return false;
+            if (bi < 0) throw new EndOfStreamException($"Truncated WebM element size at byte {headerStart}.");
             val = (val << 8) | (ulong)(byte)bi;
             allOnes = (allOnes << 8) | 0xFF;
         }
@@ -586,7 +598,7 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
         for (int i = 0; i < byteCount; i++)
         {
             int b = _stream.ReadByte();
-            if (b < 0) break;
+            if (b < 0) throw new EndOfStreamException($"Truncated WebM integer at byte {_stream.Position}.");
             v = (v << 8) | (ulong)(byte)b;
         }
         return v;
@@ -609,10 +621,10 @@ public sealed class WebmOpusSampleSource : ISampleProvider, IDisposable
         while (off < arr.Length)
         {
             int n = _stream.Read(arr, off, arr.Length - off);
-            if (n <= 0) break;
+            if (n <= 0) throw new EndOfStreamException($"Truncated WebM element at byte {_stream.Position}.");
             off += n;
         }
-        return off == arr.Length ? arr : arr[..off];
+        return arr;
     }
 
     private void SkipBytes(long count)

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Text;
+using Microsoft.Win32;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -27,6 +28,7 @@ internal sealed class SetupWindow : Window
     private readonly CheckBox _launchAfterInstall;
     private readonly string _defaultInstallPath;
     private readonly long _expectedPayloadBytes;
+    private readonly bool _isUpdate;
     private bool _installed;
     private string? _failureMessage;
 
@@ -42,10 +44,12 @@ internal sealed class SetupWindow : Window
         RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Dark;
         CanResize = false;
 
-        _defaultInstallPath = Path.Combine(
+        string fallbackInstallPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "Programs", "EchoMusic");
+        (_defaultInstallPath, _isUpdate) = DetectExistingInstall(fallbackInstallPath);
         _expectedPayloadBytes = ReadExpectedPayloadBytes();
+        string actionLabel = _isUpdate ? "Update Echo Music" : "Install Echo Music";
 
         var root = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("220,*") };
         root.Children.Add(BuildBrandPanel());
@@ -61,14 +65,16 @@ internal sealed class SetupWindow : Window
         var header = new StackPanel { Spacing = 6 };
         header.Children.Add(new TextBlock
         {
-            Text = "Install Echo Music",
+            Text = actionLabel,
             FontSize = 27,
             FontWeight = FontWeight.Bold,
             Foreground = new SolidColorBrush(PrimaryText),
         });
         header.Children.Add(new TextBlock
         {
-            Text = "A native Windows music player, ready in a few steps.",
+            Text = _isUpdate
+                ? "An existing Echo Music installation was detected. Your app will be updated in place."
+                : "A native Windows music player, ready in a few steps.",
             FontSize = 13.5,
             Foreground = new SolidColorBrush(SecondaryText),
         });
@@ -157,7 +163,9 @@ internal sealed class SetupWindow : Window
         var footer = new Grid { RowDefinitions = RowDefinitions.Parse("Auto,Auto"), ColumnDefinitions = ColumnDefinitions.Parse("*,Auto") };
         _status = new TextBlock
         {
-            Text = "Installs for your Windows user; no administrator prompt is required.",
+            Text = _isUpdate
+                ? $"Existing installation detected at {_defaultInstallPath}. Setup will update it for your Windows user."
+                : "Installs for your Windows user; no administrator prompt is required.",
             FontSize = 11.5,
             Foreground = new SolidColorBrush(SecondaryText),
             TextWrapping = TextWrapping.Wrap,
@@ -167,7 +175,7 @@ internal sealed class SetupWindow : Window
         Grid.SetRow(_status, 0);
         Grid.SetColumn(_status, 0);
         footer.Children.Add(_status);
-        _installButton = MakePrimaryButton("Install Echo Music");
+        _installButton = MakePrimaryButton(actionLabel);
         _installButton.MinWidth = 176;
         _installButton.Click += async (_, _) =>
         {
@@ -203,6 +211,42 @@ internal sealed class SetupWindow : Window
         main.Children.Add(footer);
         Grid.SetRow(footer, 2);
         Content = root;
+    }
+
+    private static (string InstallPath, bool IsUpdate) DetectExistingInstall(string fallbackPath)
+    {
+        var candidates = new List<string>();
+        void AddCandidate(object? value)
+        {
+            if (value is not string path) return;
+            path = path.Trim();
+            if (path.Length == 0 || !Path.IsPathFullyQualified(path)) return;
+            if (!candidates.Contains(path, StringComparer.OrdinalIgnoreCase)) candidates.Add(path);
+        }
+
+        try
+        {
+            using var appKey = Registry.CurrentUser.OpenSubKey(@"Software\EchoMusic");
+            AddCandidate(appKey?.GetValue("InstallDir"));
+        }
+        catch { }
+        try
+        {
+            using var uninstallKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\EchoMusic");
+            AddCandidate(uninstallKey?.GetValue("InstallLocation"));
+        }
+        catch { }
+        AddCandidate(fallbackPath);
+
+        foreach (var path in candidates)
+        {
+            try
+            {
+                if (File.Exists(Path.Combine(path, "EchoMusic.exe"))) return (path, true);
+            }
+            catch { }
+        }
+        return (fallbackPath, false);
     }
 
     private Control BuildBrandPanel()
@@ -393,7 +437,9 @@ internal sealed class SetupWindow : Window
         _progress.Minimum = 0;
         _progress.Maximum = 100;
         _progress.Value = 0;
-        _status.Text = "Preparing installation… 0%";
+        string actionVerb = _isUpdate ? "Updating" : "Installing";
+        string completedVerb = _isUpdate ? "Updated" : "Installed";
+        _status.Text = $"Preparing to {(_isUpdate ? "update" : "install")}… 0%";
 
         string progressFile = Path.Combine(installPath, ".echo-install-progress");
         string tempFolder = Path.Combine(Path.GetTempPath(), "EchoMusicSetup-" + Guid.NewGuid().ToString("N"));
@@ -433,7 +479,7 @@ internal sealed class SetupWindow : Window
                     {
                         int percent = (int)Math.Clamp(Math.Floor(writtenBytes * 95.0 / _expectedPayloadBytes), 0, 95);
                         _progress.Value = percent;
-                        _status.Text = $"Installing Echo Music… {percent}%";
+                        _status.Text = $"{actionVerb} Echo Music… {percent}%";
                     }
                 }
                 catch { /* The progress file may briefly be absent while the installer starts or updates it. */ }
@@ -445,7 +491,7 @@ internal sealed class SetupWindow : Window
 
             _progress.Value = 100;
             _installed = true;
-            _status.Text = $"Installed to {installPath}. A Start Menu shortcut has been added. 100%";
+            _status.Text = $"{completedVerb} to {installPath}. A Start Menu shortcut has been added. 100%";
             _installButton.Content = "Finish";
             _installButton.IsEnabled = true;
             _progress.IsVisible = false;
@@ -454,7 +500,7 @@ internal sealed class SetupWindow : Window
         {
             _failureMessage = ex.Message;
             _status.Text = "Installation could not be completed. " + ex.Message;
-            _installButton.Content = "Retry installation";
+            _installButton.Content = _isUpdate ? "Retry update" : "Retry installation";
             _installButton.IsEnabled = true;
             _progress.IsVisible = false;
             _installPath.IsEnabled = true;

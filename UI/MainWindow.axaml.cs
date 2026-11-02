@@ -33,6 +33,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _uiTimer;
     private readonly DispatcherTimer _visualMotionTimer;
     private DispatcherTimer? _searchSuggestFadeTimer;
+    private DispatcherTimer? _importLogoTimer;
+    private bool _showYouTubeMusicImportLogo;
     private readonly float[] _fftScratch = new float[32];
     private SpectrumVisualizerControl? _dockCurrentArtSpectrum;
     private Border? _dockCurrentArtSpectrumPlate;
@@ -78,6 +80,7 @@ public partial class MainWindow : Window
     private IPointer? _activeScrollBarDragPointer;
     private readonly HashSet<ScrollViewer> _manuallyScrolledLyricViewers = new();
     private bool _homeContinuationPendingUntilDragEnds;
+    private Action? _updateVirtualizedDetailRows;
     private bool _lastForegroundVisible;
     private bool _animationFramePending;
     private bool _hasLastMotionFrame;
@@ -97,6 +100,7 @@ public partial class MainWindow : Window
     private sealed class DeferredArtworkLoad
     {
         public required string Url { get; init; }
+        public int DecodeWidth { get; init; } = 384;
         public Control? Fallback { get; init; }
         public ScrollViewer? Viewer { get; set; }
         public EventHandler<VisualTreeAttachmentEventArgs>? AttachHandler { get; set; }
@@ -534,18 +538,18 @@ public partial class MainWindow : Window
 
     private TimeSpan DesiredUiInterval => !IsForegroundVisible
         ? TimeSpan.FromMilliseconds(500)
-        : (_audio.IsPlaying || _audio.IsLoading || _streamBuffering)
-            ? AnimationFrameInterval
-            : IsResourceSaverActive
-                ? TimeSpan.FromMilliseconds(500)
+        : IsResourceSaverActive
+            ? TimeSpan.FromMilliseconds(250)
+            : (_audio.IsPlaying || _audio.IsLoading || _streamBuffering)
+                ? AnimationFrameInterval
                 : TimeSpan.FromMilliseconds(250);
 
     private void UpdateWindowActivityState()
     {
         bool foregroundVisible = IsForegroundVisible;
         _lastForegroundVisible = foregroundVisible;
-        bool pauseVisualWork = !foregroundVisible;
-        bool reduceResources = IsResourceSaverActive || pauseVisualWork;
+        bool pauseVisualWork = !foregroundVisible || IsResourceSaverActive;
+        bool reduceResources = pauseVisualWork;
         ImageCache.SetResourceSaver(reduceResources);
         ScrollingTitleTextBlock.SetPerformanceMode(CurrentPerformanceMode, reduceResources);
         var animationInterval = AnimationFrameInterval;
@@ -664,6 +668,33 @@ public partial class MainWindow : Window
         ResourceSaverBtn.ContextMenu = menu;
     }
 
+    private void StartImportLogoCycle()
+    {
+        try
+        {
+            using var logoStream = AssetLoader.Open(new Uri("avares://EchoMusic/Assets/ytmusic-on-platform.png"));
+            SpotifyImportYouTubeMark.Source = new Bitmap(logoStream);
+        }
+        catch { }
+        var fade = new Transitions
+        {
+            new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(700), Easing = new CubicEaseOut() },
+        };
+        SpotifyImportSpotifyMark.Transitions = fade;
+        SpotifyImportYouTubeMark.Transitions = new Transitions
+        {
+            new DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(700), Easing = new CubicEaseOut() },
+        };
+        _importLogoTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(3600) };
+        _importLogoTimer.Tick += (_, _) =>
+        {
+            _showYouTubeMusicImportLogo = !_showYouTubeMusicImportLogo;
+            SpotifyImportSpotifyMark.Opacity = _showYouTubeMusicImportLogo ? 0 : 1;
+            SpotifyImportYouTubeMark.Opacity = _showYouTubeMusicImportLogo ? 1 : 0;
+        };
+        _importLogoTimer.Start();
+    }
+
     private void OnWindowClosing(object? sender, WindowClosingEventArgs e)
     {
         if (!AllowTrueExit && _store.Settings.CloseToTray && OperatingSystem.IsWindows())
@@ -675,6 +706,7 @@ public partial class MainWindow : Window
         }
         _uiTimer.Stop();
         _visualMotionTimer.Stop();
+        _importLogoTimer?.Stop();
         _leftSidebarAnimation?.Stop();
         _rightSidebarAnimation?.Stop();
         _smoothScrollStates.Clear();
@@ -836,6 +868,7 @@ public partial class MainWindow : Window
         NavLikedBtn.Click += async (_, _) => await NavigateToAsync("liked", () => { RenderLibraryView("liked"); return Task.CompletedTask; });
         NavDownloadsBtn.Click += async (_, _) => await NavigateToAsync("downloads", () => { RenderDownloadsView(); return Task.CompletedTask; });
         NavSpotifyBtn.Click += async (_, _) => await NavigateToAsync("spotify", () => { RenderSpotifyImportView(); return Task.CompletedTask; });
+        StartImportLogoCycle();
         NavEqBtn.Click += async (_, _) => await NavigateToAsync("eq", () => { RenderEqualizerView(); return Task.CompletedTask; });
         NavLocalBtn.Click += async (_, _) => await NavigateToAsync("local", () => { RenderLocalMusicView(); return Task.CompletedTask; });
         NavStatsBtn.Click += async (_, _) => await NavigateToAsync("stats", () => { RenderStatsWrappedView(null); return Task.CompletedTask; });
@@ -1171,13 +1204,13 @@ public partial class MainWindow : Window
     private void EnsureVisualMotionTimerRunning()
     {
         _visualMotionTimer.Interval = AnimationFrameInterval;
-        if (IsForegroundVisible && !_visualMotionTimer.IsEnabled)
+        if (IsForegroundVisible && !IsResourceSaverActive && !_visualMotionTimer.IsEnabled)
             _visualMotionTimer.Start();
     }
 
     private void OnVisualMotionTick(object? sender, EventArgs e)
     {
-        if (!IsForegroundVisible)
+        if (!IsForegroundVisible || IsResourceSaverActive)
         {
             _visualMotionTimer.Stop();
             return;
@@ -1283,14 +1316,15 @@ public partial class MainWindow : Window
             SleepTimerTopLabel.IsVisible = false;
         }
 
-        bool cardSpectrumNeedsDecay = _trackPlayIndicators.Any(entry =>
+        bool animateSpectrum = !IsResourceSaverActive;
+        bool cardSpectrumNeedsDecay = animateSpectrum && _trackPlayIndicators.Any(entry =>
             entry.Visualizer.TryGetTarget(out var visualizer) && !visualizer.IsSettled);
-        bool spectrumNeedsDecay = cardSpectrumNeedsDecay
+        bool spectrumNeedsDecay = animateSpectrum && (cardSpectrumNeedsDecay
             || !MiniBarSpectrum.IsSettled
             || (_flowSpectrum is { IsVisible: true, IsSettled: false })
             || (_dockOpen && _dockTab == "now" && _dockCurrentArtSpectrum is { IsVisible: true, IsSettled: false })
-            || (FullscreenOverlay.IsVisible && (!FsSpectrum.IsSettled || !FsArtSpectrum.IsSettled));
-        if (_audio.IsPlaying || spectrumNeedsDecay)
+            || (FullscreenOverlay.IsVisible && (!FsSpectrum.IsSettled || !FsArtSpectrum.IsSettled)));
+        if (animateSpectrum && (_audio.IsPlaying || spectrumNeedsDecay))
         {
             _audio.CopySpectrum32(_fftScratch);
             if (MiniBarSpectrum.IsVisible) MiniBarSpectrum.UpdateBands(_fftScratch, _audio.IsPlaying);
@@ -1321,7 +1355,7 @@ public partial class MainWindow : Window
             }
             bool show = _audio.IsPlaying && string.Equals(entry.TrackId, activeTrackId, StringComparison.Ordinal);
             if (overlay.IsVisible != show) overlay.IsVisible = show;
-            if (show) visualizer.UpdateBands(_fftScratch, true);
+            if (show && animateSpectrum) visualizer.UpdateBands(_fftScratch, true);
         }
         for (int i = _trackPlayIndicators.Count - 1; i >= 0; i--)
         {
@@ -1336,7 +1370,7 @@ public partial class MainWindow : Window
             bool playingHere = _audio.IsPlaying && string.Equals(entry.TrackId, activeTrackId, StringComparison.Ordinal);
             if (playIcon.IsVisible == playingHere) playIcon.IsVisible = !playingHere;
             if (visualizer.IsVisible != playingHere) visualizer.IsVisible = playingHere;
-            if (playingHere || !visualizer.IsSettled) visualizer.UpdateBands(_fftScratch, playingHere);
+            if (animateSpectrum && (playingHere || !visualizer.IsSettled)) visualizer.UpdateBands(_fftScratch, playingHere);
         }
 
         SyncActiveLyricHighlight(pos);
@@ -1590,7 +1624,7 @@ public partial class MainWindow : Window
         var lyricsTask = _lyricsFetchCts is { } pendingLyrics
             ? FetchAndApplyLyricsAsync(track, pendingLyrics.Token)
             : Task.CompletedTask;
-        var bmp = await ImageCache.LoadAsync(InnertubeParsers.UpgradeThumb(track.Thumbnail, 544), _yt.SharedHttp, _store.ArtCacheDir);
+        var bmp = await ImageCache.LoadAsync(InnertubeParsers.UpgradeThumb(track.Thumbnail, 1200), _yt.SharedHttp, _store.ArtCacheDir, decodeWidth: 1200);
         if (_audio.CurrentTrack?.Id == track.Id)
         {
             NowPlayingArtImg.Source = bmp;
@@ -1938,7 +1972,7 @@ public partial class MainWindow : Window
         LikedCountBadge.Text = _store.LikedSongs.Count.ToString();
         DownloadsCountBadge.Text = _store.Downloads.Count(d => d.Status == "done").ToString();
         string playlistFingerprint = string.Join("\u001f", _store.Playlists.Select(pl => string.Join("\u001e",
-            pl.Id, pl.Name, pl.CustomCoverPath ?? "", pl.Tracks.Count.ToString(),
+            pl.Id, pl.Name, pl.CustomCoverPath ?? "", pl.CoverRoundness.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture), pl.Tracks.Count.ToString(),
             string.Join(",", pl.Tracks.Take(4).Select(track => track.Id + ":" + track.Thumbnail)))));
         if (string.Equals(_sidebarPlaylistFingerprint, playlistFingerprint, StringComparison.Ordinal)) return;
         _sidebarPlaylistFingerprint = playlistFingerprint;
@@ -2343,6 +2377,12 @@ public partial class MainWindow : Window
         var maxY = Math.Max(0, viewer.Extent.Height - viewer.Viewport.Height);
         targetX = Math.Clamp(targetX, 0, maxX);
         targetY = Math.Clamp(targetY, 0, maxY);
+        if (IsResourceSaverActive)
+        {
+            _smoothScrollStates.Remove(viewer);
+            viewer.Offset = new Vector(targetX, targetY);
+            return;
+        }
         if (!_smoothScrollStates.TryGetValue(viewer, out var state))
         {
             state = new SmoothScrollState
@@ -2361,7 +2401,7 @@ public partial class MainWindow : Window
 
     private void EnsureAnimationFramePump()
     {
-        if (_animationFramePending || !IsForegroundVisible) return;
+        if (_animationFramePending || !IsForegroundVisible || IsResourceSaverActive) return;
         _animationFramePending = true;
         RequestAnimationFrame(AdvanceAnimationFrame);
     }
@@ -2369,7 +2409,7 @@ public partial class MainWindow : Window
     private void AdvanceAnimationFrame(TimeSpan frameTime)
     {
         _animationFramePending = false;
-        if (!IsForegroundVisible)
+        if (!IsForegroundVisible || IsResourceSaverActive)
         {
             _hasLastMotionFrame = false;
             return;
@@ -2554,9 +2594,13 @@ public partial class MainWindow : Window
         {
             contentWidth = 40;
         }
-        else if (button.Content is StackPanel row && row.Children.OfType<PathIcon>().FirstOrDefault() is { } icon)
+        else if (button.Content is StackPanel rowWithPath && rowWithPath.Children.OfType<PathIcon>().FirstOrDefault() is { } icon)
         {
             contentWidth = double.IsFinite(icon.Width) && icon.Width > 0 ? icon.Width : icon.Bounds.Width;
+        }
+        else if (button.Content is StackPanel rowWithIconGrid && rowWithIconGrid.Children.OfType<Grid>().FirstOrDefault() is { } iconGrid)
+        {
+            contentWidth = double.IsFinite(iconGrid.Width) && iconGrid.Width > 0 ? iconGrid.Width : iconGrid.Bounds.Width;
         }
         else if (button.Content is Grid grid && grid.Children.OfType<PathIcon>().FirstOrDefault() is { } gridIcon)
         {
@@ -2842,9 +2886,9 @@ public partial class MainWindow : Window
                 });
 
                 var artImg = new Image { Width = 280, Height = 280, Stretch = Stretch.UniformToFill };
-                LoadImageInto(artImg, InnertubeParsers.UpgradeThumb(tr.Thumbnail, 544), isLiveCurrent
+                LoadImageInto(artImg, InnertubeParsers.UpgradeThumb(tr.Thumbnail, 1200), isLiveCurrent
                     ? BuildGeneratedMediaCover(new MediaCardItem { Id = tr.Id, Kind = "playlist", Title = tr.Title, Subtitle = tr.ArtistNames }, 268)
-                    : null);
+                    : null, decodeWidth: 1200);
                 var artSpectrum = new SpectrumVisualizerControl { Width = 38, Height = 21, BarCount = 7, BarColor = ThemeManager.GetPalette(_store.Settings.Theme).Accent };
                 var artSpectrumPlate = new Border
                 {
@@ -3360,16 +3404,17 @@ public partial class MainWindow : Window
 
     private async void OnCenterScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
-        if (_activeNavKey != "home" || _loadingMoreHome || string.IsNullOrEmpty(_homeContinuation) || _homeShelvesContainer is null)
-            return;
-
+        _updateVirtualizedDetailRows?.Invoke();
         if (_activeScrollBarDragPointer is not null)
         {
-            _homeContinuationPendingUntilDragEnds = true;
+            if (_activeNavKey == "home" && !_loadingMoreHome && !string.IsNullOrEmpty(_homeContinuation))
+                _homeContinuationPendingUntilDragEnds = true;
             return;
         }
 
         double maxOffset = CenterScrollViewer.Extent.Height - CenterScrollViewer.Viewport.Height;
+        if (_activeNavKey != "home" || _loadingMoreHome || string.IsNullOrEmpty(_homeContinuation) || _homeShelvesContainer is null)
+            return;
         if (maxOffset > 40 && CenterScrollViewer.Offset.Y >= maxOffset - 360)
             await AppendNextHomeContinuationAsync();
     }
@@ -4380,7 +4425,8 @@ public partial class MainWindow : Window
         // Keep fractional Spotify durations through the sum; rounding each row first can add seconds.
         var total = TimeSpan.FromMilliseconds(pl.Tracks.Sum(t => Math.Max(0, t.PlaylistDurationSeconds)) * 1000.0);
         string runtime = total.TotalHours >= 1 ? $"{(int)total.TotalHours} hr {total.Minutes} min" : $"{(int)total.TotalMinutes} min {total.Seconds} sec";
-        var ownerLabel = !string.IsNullOrWhiteSpace(pl.OwnerName) ? $"By {pl.OwnerName}" : (pl.Source == "Spotify" ? "Spotify public playlist" : "Local playlist");
+        var sourceLabel = pl.Source switch { "Spotify" => "Spotify playlist", "YouTube Music" => "YouTube Music playlist", _ => "Local playlist" };
+        var ownerLabel = !string.IsNullOrWhiteSpace(pl.OwnerName) ? $"By {pl.OwnerName}" : sourceLabel;
         var page = new DetailPageResult
         {
             Id = pl.Id, Kind = "local-playlist", Title = pl.Name,
@@ -4391,19 +4437,28 @@ public partial class MainWindow : Window
         RenderDetailPage(page, pl);
     }
 
+    private static double GetPlaylistCoverRadius(double roundness, double size)
+    {
+        double value = Math.Clamp(double.IsFinite(roundness) ? roundness : 14, 0, 100);
+        // Preserve the prior min-3px / 7%-of-size treatment at the default setting.
+        if (Math.Abs(value - 14) < 0.0001) return Math.Max(3, size * 0.07);
+        return size * value / 200.0;
+    }
+
     private Control BuildLocalPlaylistCover(LocalPlaylist playlist, double size)
     {
+        var radius = new CornerRadius(GetPlaylistCoverRadius(playlist.CoverRoundness, size));
         if (!string.IsNullOrWhiteSpace(playlist.CustomCoverPath) && File.Exists(playlist.CustomCoverPath))
         {
             try
             {
                 var image = new Image { Source = new Bitmap(playlist.CustomCoverPath), Stretch = Stretch.UniformToFill };
-                return new Border { Width = size, Height = size, CornerRadius = new CornerRadius(Math.Max(3, size * 0.07)), ClipToBounds = true, Child = image };
+                return new Border { Width = size, Height = size, CornerRadius = radius, ClipToBounds = true, Child = image };
             }
             catch { }
         }
         if (playlist.Tracks.Count >= 4)
-            return BuildPlaylistCollage(playlist.Tracks, size);
+            return BuildPlaylistCollage(playlist.Tracks, size, playlist.CoverRoundness);
 
         try
         {
@@ -4434,7 +4489,7 @@ public partial class MainWindow : Window
             return new Border
             {
                 Width = size, Height = size,
-                CornerRadius = new CornerRadius(Math.Max(3, size * 0.07)),
+                CornerRadius = radius,
                 ClipToBounds = true,
                 Background = new LinearGradientBrush
                 {
@@ -4447,21 +4502,35 @@ public partial class MainWindow : Window
         }
         catch
         {
-            return BuildPlaylistCollage(playlist.Tracks, size);
+            return BuildPlaylistCollage(playlist.Tracks, size, playlist.CoverRoundness);
         }
     }
 
-    private Control BuildPlaylistCollage(IReadOnlyList<TrackItem> tracks, double size)
+    private Control BuildPlaylistCollage(IReadOnlyList<TrackItem> tracks, double size, double roundness = 14)
     {
         var grid = new Grid { RowDefinitions = RowDefinitions.Parse("*,*"), ColumnDefinitions = ColumnDefinitions.Parse("*,*"), Width = size, Height = size };
         for (int i = 0; i < 4; i++)
         {
-            var img = new Image { Stretch = Stretch.UniformToFill };
-            if (i < tracks.Count) LoadImageInto(img, tracks[i].Thumbnail);
-            var cell = new Border { ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = img };
+            var tile = new Grid { ClipToBounds = true };
+            if (i < tracks.Count)
+            {
+                var track = tracks[i];
+                tile.Children.Add(BuildGeneratedMediaCover(new MediaCardItem
+                {
+                    Id = track.Id, Kind = "track", Title = track.Title, Subtitle = track.ArtistNames,
+                }, size * 0.5));
+                var img = new Image { Stretch = Stretch.UniformToFill };
+                LoadImageInto(img, InnertubeParsers.UpgradeThumb(track.Thumbnail, 320));
+                tile.Children.Add(img);
+            }
+            else
+            {
+                tile.Children.Add(new Border { Background = ResBrush("BgSurfaceBrush") });
+            }
+            var cell = new Border { ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = tile };
             Grid.SetRow(cell, i / 2); Grid.SetColumn(cell, i % 2); grid.Children.Add(cell);
         }
-        return new Border { Width = size, Height = size, CornerRadius = new CornerRadius(Math.Max(3, size * 0.07)), ClipToBounds = true, Child = grid };
+        return new Border { Width = size, Height = size, CornerRadius = new CornerRadius(GetPlaylistCoverRadius(roundness, size)), ClipToBounds = true, Child = grid };
     }
 
     private Border BuildCardPlayBadge(TrackItem? track, double size)
@@ -4646,7 +4715,9 @@ public partial class MainWindow : Window
                 : artImg;
         var artWrap = new Border
         {
-            Width = 176, Height = 176, CornerRadius = new CornerRadius(page.Kind == "artist" ? 88 : 8),
+            Width = 176, Height = 176, CornerRadius = new CornerRadius(localOwner is not null
+                ? GetPlaylistCoverRadius(localOwner.CoverRoundness, 176)
+                : page.Kind == "artist" ? 88 : 8),
             ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"),
             BoxShadow = BoxShadows.Parse("0 12 32 0 #66000000"), Child = artwork,
         };
@@ -4655,7 +4726,12 @@ public partial class MainWindow : Window
         var infoStack = new StackPanel { Spacing = 7, Margin = new Thickness(22, 0, 0, 0), VerticalAlignment = VerticalAlignment.Bottom, ClipToBounds = true };
         infoStack.Children.Add(new TextBlock
         {
-            Text = localOwner?.Source == "Spotify" ? "SPOTIFY PLAYLIST" : page.Kind.ToUpperInvariant(),
+            Text = localOwner?.Source switch
+            {
+                "Spotify" => "SPOTIFY PLAYLIST",
+                "YouTube Music" => "YOUTUBE MUSIC IMPORT",
+                _ => page.Kind.ToUpperInvariant(),
+            },
             FontSize = 11,
             FontWeight = FontWeight.Bold,
             LetterSpacing = 0.8,
@@ -4733,17 +4809,95 @@ public partial class MainWindow : Window
         root.Children.Add(hdrBorder);
         if (localOwner is not null && localOwner.Tracks.Count > 0) _ = ApplyPlaylistAmbientAsync(hdrBorder, localOwner.Tracks, localOwner.CustomCoverPath);
 
+        const double virtualTrackRowHeight = 54;
+        const double virtualTrackOverscanRows = 5;
+        bool useVirtualizedRows = (localOwner is not null || page.Kind == "playlist") && page.Tracks.Count > 64;
         var tableHost = new Border();
         TextBox? trackFilterBox = null;
+        List<TrackItem> activeTrackSubset = new();
+        Canvas? virtualizedTrackCanvas = null;
+        var visibleTrackRows = new Dictionary<int, Control>();
+
+        void UpdateVisibleTrackRows()
+        {
+            var canvas = virtualizedTrackCanvas;
+            if (!useVirtualizedRows || canvas is null || activeTrackSubset.Count == 0
+                || !CenterViewHost.Children.Contains(root) || canvas.GetVisualRoot() is null)
+                return;
+            var origin = canvas.TranslatePoint(new Point(0, 0), CenterScrollViewer);
+            if (origin is null) return;
+
+            double viewportHeight = CenterScrollViewer.Viewport.Height;
+            double topInViewport = origin.Value.Y;
+            double visibleTop = -topInViewport;
+            double overscan = virtualTrackRowHeight * virtualTrackOverscanRows;
+            double visibleBottom = visibleTop + viewportHeight;
+            var desired = new HashSet<int>();
+            if (visibleBottom >= -overscan && visibleTop <= canvas.Height + overscan)
+            {
+                int first = Math.Clamp((int)Math.Floor((visibleTop - overscan) / virtualTrackRowHeight), 0, activeTrackSubset.Count - 1);
+                int last = Math.Clamp((int)Math.Ceiling((visibleBottom + overscan) / virtualTrackRowHeight), 0, activeTrackSubset.Count - 1);
+                for (int i = first; i <= last; i++) desired.Add(i);
+            }
+
+            foreach (int oldIndex in visibleTrackRows.Keys.Where(index => !desired.Contains(index)).ToList())
+            {
+                canvas.Children.Remove(visibleTrackRows[oldIndex]);
+                visibleTrackRows.Remove(oldIndex);
+            }
+
+            double rowWidth = tableHost.Bounds.Width > 1 ? tableHost.Bounds.Width : CenterScrollViewer.Viewport.Width;
+            foreach (int index in desired)
+            {
+                if (visibleTrackRows.ContainsKey(index)) continue;
+                var track = activeTrackSubset[index];
+                var oneRow = (StackPanel)BuildTrackListTable(new List<TrackItem> { track }, showIndex: true,
+                    localPlaylistOwner: localOwner, showAlbumColumn: page.Kind != "album",
+                    collectionContext: playbackSource, indexOffset: index, includeHeader: false,
+                    playbackQueue: activeTrackSubset);
+                if (oneRow.Children.Count == 0) continue;
+                var row = oneRow.Children[0];
+                oneRow.Children.RemoveAt(0);
+                row.Width = rowWidth;
+                Canvas.SetLeft(row, 0);
+                Canvas.SetTop(row, index * virtualTrackRowHeight);
+                canvas.Children.Add(row);
+                visibleTrackRows[index] = row;
+            }
+        }
+
         void RefreshDetailTrackTable()
         {
+            visibleTrackRows.Clear();
+            virtualizedTrackCanvas = null;
             if (page.Tracks.Count == 0) { tableHost.Child = null; return; }
             string q = trackFilterBox?.Text?.Trim() ?? "";
-            var subset = string.IsNullOrEmpty(q)
+            activeTrackSubset = (string.IsNullOrEmpty(q)
                 ? page.Tracks
-                : page.Tracks.Where(t => t.Title.Contains(q, StringComparison.OrdinalIgnoreCase) || t.ArtistNames.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
-            tableHost.Child = BuildTrackListTable(subset, showIndex: true, localPlaylistOwner: localOwner, showAlbumColumn: page.Kind != "album", collectionContext: playbackSource);
+                : page.Tracks.Where(t => t.Title.Contains(q, StringComparison.OrdinalIgnoreCase) || t.ArtistNames.Contains(q, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            if (useVirtualizedRows && activeTrackSubset.Count > 64)
+            {
+                var rows = (StackPanel)BuildTrackListTable(new List<TrackItem>(), showIndex: true,
+                    localPlaylistOwner: localOwner, showAlbumColumn: page.Kind != "album", collectionContext: playbackSource);
+                virtualizedTrackCanvas = new Canvas
+                {
+                    Height = activeTrackSubset.Count * virtualTrackRowHeight,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    ClipToBounds = false,
+                };
+                rows.Children.Add(virtualizedTrackCanvas);
+                tableHost.Child = rows;
+            }
+            else
+            {
+                tableHost.Child = BuildTrackListTable(activeTrackSubset, showIndex: true, localPlaylistOwner: localOwner,
+                    showAlbumColumn: page.Kind != "album", collectionContext: playbackSource);
+            }
+            if (useVirtualizedRows && tableHost.GetVisualRoot() is not null)
+                Dispatcher.UIThread.Post(UpdateVisibleTrackRows, DispatcherPriority.Loaded);
         }
+
         if (page.Tracks.Count > 8)
         {
             trackFilterBox = new TextBox
@@ -4819,6 +4973,8 @@ public partial class MainWindow : Window
             root.Children.Add(EmptyHint("No items were returned for this shelf. Try refreshing or browse another section."));
 
         SetCenterContent(root);
+        _updateVirtualizedDetailRows = useVirtualizedRows ? UpdateVisibleTrackRows : null;
+        if (useVirtualizedRows) Dispatcher.UIThread.Post(UpdateVisibleTrackRows, DispatcherPriority.Loaded);
     }
 
     // --------------------------------------------------------- Reusable PC Spotify Card & Table Builders
@@ -4926,56 +5082,155 @@ public partial class MainWindow : Window
 
         if (shelf.Tracks.Count > 0)
         {
-            var grid = new UniformGrid { Columns = 2 };
             int count = Math.Min(10, shelf.Tracks.Count);
-            for (int i = 0; i < count; i++)
+            int rows = (count + 1) / 2;
+            var cardsHost = new Border
             {
-                var captured = shelf.Tracks[i];
-                var card = new Border
+                Height = rows * 70,
+                Background = Brushes.Transparent,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+            };
+
+            Control BuildTrackCards()
+            {
+                var grid = new UniformGrid { Columns = 2 };
+                for (int i = 0; i < count; i++)
                 {
-                    Background = ResBrush("BgCardBrush"),
-                    CornerRadius = new CornerRadius(8),
-                    Padding = new Thickness(10, 8),
-                    Margin = new Thickness(i % 2 == 0 ? 0 : 5, 0, i % 2 == 0 ? 5 : 0, 8),
-                    Cursor = new Cursor(StandardCursorType.Hand),
-                };
-                card.PointerEntered += (_, _) => card.Background = ResBrush("BgHoverBrush");
-                card.PointerExited += (_, _) => card.Background = ResBrush("BgCardBrush");
+                    var captured = shelf.Tracks[i];
+                    var card = new Border
+                    {
+                        Background = ResBrush("BgCardBrush"),
+                        CornerRadius = new CornerRadius(8),
+                        Padding = new Thickness(10, 8),
+                        Margin = new Thickness(i % 2 == 0 ? 0 : 5, 0, i % 2 == 0 ? 5 : 0, 8),
+                        Cursor = new Cursor(StandardCursorType.Hand),
+                    };
+                    card.PointerEntered += (_, _) => card.Background = ResBrush("BgHoverBrush");
+                    card.PointerExited += (_, _) => card.Background = ResBrush("BgCardBrush");
 
-                var row = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("46,*,Auto") };
-                var img = new Image { Width = 46, Height = 46, Stretch = Stretch.UniformToFill };
-                LoadImageInto(img, captured.Thumbnail);
-                row.Children.Add(new Border { Width = 46, Height = 46, CornerRadius = new CornerRadius(6), ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = img });
+                    var row = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("46,*,Auto") };
+                    var img = new Image { Width = 46, Height = 46, Stretch = Stretch.UniformToFill };
+                    LoadImageInto(img, captured.Thumbnail);
+                    row.Children.Add(new Border { Width = 46, Height = 46, CornerRadius = new CornerRadius(6), ClipToBounds = true, Background = ResBrush("BgSurfaceBrush"), Child = img });
 
-                var meta = new StackPanel { Margin = new Thickness(12, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 2, ClipToBounds = true };
-                meta.Children.Add(new ScrollingTitleTextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
-                meta.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 12, FontWeight = FontWeight.Medium, Foreground = ResBrush("TextSecondaryBrush") });
-                Grid.SetColumn(meta, 1);
-                row.Children.Add(meta);
+                    var meta = new StackPanel { Margin = new Thickness(12, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center, Spacing = 2, ClipToBounds = true };
+                    meta.Children.Add(new ScrollingTitleTextBlock { Text = captured.Title, FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+                    meta.Children.Add(new TextBlock { Text = captured.ArtistNames, FontSize = 12, FontWeight = FontWeight.Medium, Foreground = ResBrush("TextSecondaryBrush") });
+                    Grid.SetColumn(meta, 1);
+                    row.Children.Add(meta);
 
-                var menuBtn = BuildTrackMoreMenuButton(captured);
-                Grid.SetColumn(menuBtn, 2);
-                row.Children.Add(menuBtn);
+                    var menuBtn = BuildTrackMoreMenuButton(captured);
+                    Grid.SetColumn(menuBtn, 2);
+                    row.Children.Add(menuBtn);
 
-                card.Child = row;
-                card.PointerPressed += async (_, ev) =>
-                {
-                    if (ev.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-                        await _audio.PlayQueueAsync(shelf.Tracks, Math.Max(0, shelf.Tracks.IndexOf(captured)));
-                };
-                AttachTrackRowInteractions(card, captured, moreButton: menuBtn);
-                grid.Children.Add(card);
+                    card.Child = row;
+                    card.PointerPressed += async (_, ev) =>
+                    {
+                        if (ev.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+                            await _audio.PlayQueueAsync(shelf.Tracks, Math.Max(0, shelf.Tracks.IndexOf(captured)));
+                    };
+                    AttachTrackRowInteractions(card, captured, moreButton: menuBtn);
+                    grid.Children.Add(card);
+                }
+                return grid;
             }
-            wrap.Children.Add(grid);
+
+            void UpdateTrackCardRealization()
+            {
+                if (cardsHost.GetVisualRoot() is null) return;
+                var origin = cardsHost.TranslatePoint(new Point(0, 0), CenterScrollViewer);
+                if (origin is null) return;
+                double overscan = Math.Max(160, cardsHost.Bounds.Height);
+                bool nearViewport = origin.Value.Y <= CenterScrollViewer.Viewport.Height + overscan
+                    && origin.Value.Y + cardsHost.Bounds.Height >= -overscan;
+                if (nearViewport)
+                {
+                    if (cardsHost.Child is null) cardsHost.Child = BuildTrackCards();
+                }
+                else if (cardsHost.Child is not null)
+                {
+                    cardsHost.Child = null;
+                }
+            }
+
+            EventHandler<ScrollChangedEventArgs> outerScrollHandler = (_, _) => UpdateTrackCardRealization();
+            EventHandler<SizeChangedEventArgs> outerSizeHandler = (_, _) => UpdateTrackCardRealization();
+            CenterScrollViewer.ScrollChanged += outerScrollHandler;
+            CenterScrollViewer.SizeChanged += outerSizeHandler;
+            cardsHost.DetachedFromVisualTree += (_, _) =>
+            {
+                CenterScrollViewer.ScrollChanged -= outerScrollHandler;
+                CenterScrollViewer.SizeChanged -= outerSizeHandler;
+                cardsHost.Child = null;
+            };
+            Dispatcher.UIThread.Post(UpdateTrackCardRealization, DispatcherPriority.Loaded);
+            wrap.Children.Add(cardsHost);
         }
 
         if (shelf.Cards.Count > 0)
         {
-            var sc = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled };
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-            foreach (var c in shelf.Cards.Take(24))
-                row.Children.Add(BuildMediaCardTile(c));
-            sc.Content = row;
+            const double cardWidth = 162;
+            const double cardSpacing = 12;
+            const double cardSlot = cardWidth + cardSpacing;
+            var cards = shelf.Cards.Take(24).ToList();
+            double rowHeight = cards.Any(card => card.Kind == "mood") ? 120 : 232;
+            var rowCanvas = new Canvas
+            {
+                Width = Math.Max(cardWidth, cards.Count * cardSlot),
+                Height = rowHeight,
+                ClipToBounds = false,
+            };
+            var sc = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = rowCanvas,
+            };
+            var visibleCards = new Dictionary<int, Control>();
+            void UpdateVisibleCards()
+            {
+                if (sc.GetVisualRoot() is null) return;
+                var origin = sc.TranslatePoint(new Point(0, 0), CenterScrollViewer);
+                if (origin is null) return;
+                double verticalOverscan = rowHeight;
+                bool shelfNearViewport = origin.Value.Y <= CenterScrollViewer.Viewport.Height + verticalOverscan
+                    && origin.Value.Y + sc.Bounds.Height >= -verticalOverscan;
+                var wanted = new HashSet<int>();
+                if (shelfNearViewport && sc.Viewport.Width > 1)
+                {
+                    int first = Math.Max(0, (int)Math.Floor(Math.Max(0, sc.Offset.X - cardSlot) / cardSlot));
+                    int last = Math.Min(cards.Count - 1, (int)Math.Ceiling((sc.Offset.X + sc.Viewport.Width + cardSlot) / cardSlot));
+                    for (int i = first; i <= last; i++) wanted.Add(i);
+                }
+                foreach (int oldIndex in visibleCards.Keys.Where(index => !wanted.Contains(index)).ToList())
+                {
+                    rowCanvas.Children.Remove(visibleCards[oldIndex]);
+                    visibleCards.Remove(oldIndex);
+                }
+                foreach (int i in wanted)
+                {
+                    if (visibleCards.ContainsKey(i)) continue;
+                    var card = BuildMediaCardTile(cards[i]);
+                    Canvas.SetLeft(card, i * cardSlot);
+                    Canvas.SetTop(card, 0);
+                    rowCanvas.Children.Add(card);
+                    visibleCards[i] = card;
+                }
+            }
+            EventHandler<ScrollChangedEventArgs> outerScrollHandler = (_, _) => UpdateVisibleCards();
+            EventHandler<SizeChangedEventArgs> outerSizeHandler = (_, _) => UpdateVisibleCards();
+            CenterScrollViewer.ScrollChanged += outerScrollHandler;
+            CenterScrollViewer.SizeChanged += outerSizeHandler;
+            sc.ScrollChanged += (_, _) => UpdateVisibleCards();
+            sc.SizeChanged += (_, _) => UpdateVisibleCards();
+            sc.DetachedFromVisualTree += (_, _) =>
+            {
+                CenterScrollViewer.ScrollChanged -= outerScrollHandler;
+                CenterScrollViewer.SizeChanged -= outerSizeHandler;
+                rowCanvas.Children.Clear();
+                visibleCards.Clear();
+            };
+            Dispatcher.UIThread.Post(UpdateVisibleCards, DispatcherPriority.Loaded);
             wrap.Children.Add(sc);
         }
 
@@ -5156,16 +5411,12 @@ public partial class MainWindow : Window
 
         var st = new StackPanel { Spacing = 8, ClipToBounds = true };
         bool localPlaylist = card.Kind == "local-playlist";
-        bool appIconFallback = localPlaylist && string.IsNullOrWhiteSpace(card.Thumbnail) && card.PreviewTracks.Count < 4;
-        bool playlistCollage = localPlaylist && string.IsNullOrWhiteSpace(card.Thumbnail) && card.PreviewTracks.Count >= 4;
         Control artTile;
-        if (appIconFallback)
+        if (localPlaylist)
         {
-            artTile = BuildLocalPlaylistCover(new LocalPlaylist { Name = card.Title }, 138);
-        }
-        else if (playlistCollage)
-        {
-            artTile = BuildPlaylistCollage(card.PreviewTracks, 138);
+            var localModel = _store.Playlists.FirstOrDefault(p => p.Id == card.Id)
+                ?? new LocalPlaylist { Name = card.Title, Tracks = card.PreviewTracks, CustomCoverPath = card.Thumbnail };
+            artTile = BuildLocalPlaylistCover(localModel, 138);
         }
         else if (string.IsNullOrWhiteSpace(card.Thumbnail))
         {
@@ -5244,11 +5495,19 @@ public partial class MainWindow : Window
         return border;
     }
 
-    internal Control BuildTrackListTable(List<TrackItem> tracks, bool showIndex, LocalPlaylist? localPlaylistOwner = null, bool showAlbumColumn = true, PlaybackCollectionContext? collectionContext = null)
+    internal Control BuildTrackListTable(
+        List<TrackItem> tracks,
+        bool showIndex,
+        LocalPlaylist? localPlaylistOwner = null,
+        bool showAlbumColumn = true,
+        PlaybackCollectionContext? collectionContext = null,
+        int indexOffset = 0,
+        bool includeHeader = true,
+        IReadOnlyList<TrackItem>? playbackQueue = null)
     {
         var listStack = new StackPanel { Spacing = 2 };
         string columns = showAlbumColumn ? "30,42,*,150,52,Auto,Auto,Auto" : "30,42,*,0,52,Auto,Auto,Auto";
-        if (showIndex)
+        if (showIndex && includeHeader)
         {
             var header = new Grid { ColumnDefinitions = ColumnDefinitions.Parse(columns), Margin = new Thickness(10, 0, 10, 4), MinHeight = 32 };
             header.Children.Add(new TextBlock { Text = "#", FontSize = 11.5, Foreground = ResBrush("TextMutedBrush"), VerticalAlignment = VerticalAlignment.Center });
@@ -5279,7 +5538,7 @@ public partial class MainWindow : Window
 
             g.Children.Add(new TextBlock
             {
-                Text = showIndex ? (idx + 1).ToString() : "",
+                Text = showIndex ? (idx + indexOffset + 1).ToString() : "",
                 FontSize = 12.5,
                 Foreground = ResBrush("TextMutedBrush"),
                 VerticalAlignment = VerticalAlignment.Center,
@@ -5407,7 +5666,11 @@ public partial class MainWindow : Window
             rowBorder.PointerPressed += async (_, ev) =>
             {
                 if (ev.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-                    await _audio.PlayQueueAsync(tracks, idx, autoRadioIfSingle: tracks.Count == 1, collectionContext: collectionContext);
+                {
+                    var queue = playbackQueue ?? tracks;
+                    int queueIndex = idx + indexOffset;
+                    await _audio.PlayQueueAsync(queue, queueIndex, autoRadioIfSingle: queue.Count == 1, collectionContext: collectionContext);
+                }
             };
             AttachTrackRowInteractions(rowBorder, tr, localPlaylistOwner, moreBtn);
             listStack.Children.Add(rowBorder);
@@ -5765,15 +6028,44 @@ public partial class MainWindow : Window
     private void OpenEditPlaylistModal(LocalPlaylist playlist)
     {
         string selectedCover = playlist.CustomCoverPath;
+        double selectedRoundness = Math.Clamp(playlist.CoverRoundness, 0, 100);
         var stack = new StackPanel { Spacing = 12 };
         stack.Children.Add(new TextBlock { Text = "Edit playlist", FontSize = 19, FontWeight = FontWeight.Bold });
         var nameBox = new TextBox { Text = playlist.Name, Watermark = "Playlist title", Padding = new Thickness(12, 9) };
-        var descBox = new TextBox { Text = playlist.Description, Watermark = "Description", Padding = new Thickness(12, 9), AcceptsReturn = true, MinHeight = 72, TextWrapping = TextWrapping.Wrap };
+        var descBox = new TextBox { Text = playlist.Description, Watermark = "Description", Padding = new Thickness(18, 9), AcceptsReturn = true, Height = 56, MinHeight = 56, VerticalContentAlignment = VerticalAlignment.Top, TextWrapping = TextWrapping.Wrap };
         stack.Children.Add(nameBox);
         stack.Children.Add(descBox);
 
         var coverRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
-        var preview = new Border { Width = 88, Height = 88, CornerRadius = new CornerRadius(8), ClipToBounds = true, Child = BuildLocalPlaylistCover(playlist, 88) };
+        var preview = new Border
+        {
+            Width = 88, Height = 88, ClipToBounds = true,
+            CornerRadius = new CornerRadius(GetPlaylistCoverRadius(selectedRoundness, 88)),
+        };
+        void ApplyPlaylistCoverPreviewRoundness()
+        {
+            // Keep the image tree intact while dragging. Clip the preview container itself as well
+            // as its cover border so every cover type visibly tracks the slider without rebuilding.
+            double radius = GetPlaylistCoverRadius(selectedRoundness, 88);
+            preview.CornerRadius = new CornerRadius(radius);
+            preview.ClipToBounds = true;
+            if (preview.Child is Border cover)
+            {
+                cover.CornerRadius = new CornerRadius(radius);
+                cover.ClipToBounds = true;
+            }
+        }
+        void RebuildPlaylistCoverPreview()
+        {
+            var previewModel = new LocalPlaylist
+            {
+                Name = playlist.Name, Source = playlist.Source, Tracks = playlist.Tracks,
+                CustomCoverPath = selectedCover, CoverRoundness = selectedRoundness,
+            };
+            preview.Child = BuildLocalPlaylistCover(previewModel, 88);
+            ApplyPlaylistCoverPreviewRoundness();
+        }
+        RebuildPlaylistCoverPreview();
         coverRow.Children.Add(preview);
         var coverControls = new StackPanel { Spacing = 7, VerticalAlignment = VerticalAlignment.Center };
         var coverStatus = new TextBlock { FontSize = 12, Foreground = ResBrush("TextSecondaryBrush"), TextWrapping = TextWrapping.Wrap, MaxWidth = 320 };
@@ -5792,16 +6084,44 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(path)) return;
             selectedCover = path;
             UpdateCoverStatus();
-            try { preview.Child = new Image { Source = new Bitmap(path), Stretch = Stretch.UniformToFill }; } catch { }
+            RebuildPlaylistCoverPreview();
         };
         var clearCover = new Button { Classes = { "ghost" }, Content = "Use automatic cover" };
         clearCover.Click += (_, _) =>
         {
             selectedCover = "";
-            preview.Child = BuildLocalPlaylistCover(new LocalPlaylist { Source = playlist.Source, Tracks = playlist.Tracks }, 88);
+            RebuildPlaylistCoverPreview();
             UpdateCoverStatus();
         };
         coverControls.Children.Add(coverStatus);
+        var roundnessLabel = new TextBlock { Text = "Cover roundness", FontSize = 12, FontWeight = FontWeight.SemiBold };
+        var roundnessValue = new TextBlock { Text = $"{selectedRoundness:0}", FontSize = 11, Width = 28, TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+        var roundnessSlider = new Slider { Minimum = 0, Maximum = 100, Value = selectedRoundness, Width = 220, Height = 22, TickFrequency = 1, IsSnapToTickEnabled = false, Classes = { "coverRoundnessSlider" } };
+        var roundnessSliderSlot = new Grid { Width = 220, Height = 26 };
+        roundnessSliderSlot.Children.Add(roundnessSlider);
+        var defaultRoundnessMark = new Border
+        {
+            Width = 1, Height = 8, Background = ResBrush("TextMutedBrush"), Opacity = 0.72,
+            HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4 + (220 - 8) * 0.14 - 0.5, 0, 0, 0), IsHitTestVisible = false,
+        };
+        ToolTip.SetTip(defaultRoundnessMark, "Default roundness");
+        roundnessSliderSlot.Children.Add(defaultRoundnessMark);
+        void UpdateDefaultRoundnessMark()
+            => defaultRoundnessMark.IsVisible = Math.Abs(selectedRoundness - 14) > 2.5;
+        UpdateDefaultRoundnessMark();
+        roundnessSlider.ValueChanged += (_, _) =>
+        {
+            selectedRoundness = Math.Clamp(roundnessSlider.Value, 0, 100);
+            roundnessValue.Text = $"{selectedRoundness:0}";
+            UpdateDefaultRoundnessMark();
+            ApplyPlaylistCoverPreviewRoundness();
+        };
+        var roundnessRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        roundnessRow.Children.Add(roundnessSliderSlot);
+        roundnessRow.Children.Add(roundnessValue);
+        coverControls.Children.Add(roundnessLabel);
+        coverControls.Children.Add(roundnessRow);
         var coverButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         coverButtons.Children.Add(chooseCover);
         coverButtons.Children.Add(clearCover);
@@ -5818,6 +6138,7 @@ public partial class MainWindow : Window
             playlist.Name = string.IsNullOrWhiteSpace(nameBox.Text) ? "My Echo Playlist" : nameBox.Text.Trim();
             playlist.Description = descBox.Text?.Trim() ?? "";
             playlist.CustomCoverPath = selectedCover;
+            playlist.CoverRoundness = Math.Clamp(selectedRoundness, 0, 100);
             playlist.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             _store.SaveDebounced();
             RefreshSidebarBadgesAndPlaylists();
@@ -6115,6 +6436,7 @@ public partial class MainWindow : Window
 
     internal void SetCenterContent(Control view)
     {
+        _updateVirtualizedDetailRows = null;
         CenterViewHost.Children.Clear();
         CenterViewHost.Children.Add(view);
     }
@@ -6181,13 +6503,13 @@ public partial class MainWindow : Window
             ? b
             : Brushes.Gray;
 
-    internal void LoadImageInto(Image target, string? urlOrPath, Control? fallback = null)
+    internal void LoadImageInto(Image target, string? urlOrPath, Control? fallback = null, int decodeWidth = 384)
     {
         if (string.IsNullOrWhiteSpace(urlOrPath)) return;
         target.Transitions = null;
         target.Opacity = 1;
         if (_deferredArtwork.Remove(target, out var old)) RemoveDeferredArtworkFromTracker(target, old);
-        var state = new DeferredArtworkLoad { Url = urlOrPath, Fallback = fallback };
+        var state = new DeferredArtworkLoad { Url = urlOrPath, DecodeWidth = decodeWidth, Fallback = fallback };
         _deferredArtwork[target] = state;
         state.DetachHandler = (_, _) =>
         {
@@ -6272,7 +6594,7 @@ public partial class MainWindow : Window
         if (state.AttachHandler is not null) target.AttachedToVisualTree -= state.AttachHandler;
         if (state.DetachHandler is not null) target.DetachedFromVisualTree -= state.DetachHandler;
         StartImageLoadingShimmer(target);
-        _ = LoadImageIntoAsync(target, state.Url, state.Fallback);
+        _ = LoadImageIntoAsync(target, state.Url, state.Fallback, state.DecodeWidth);
     }
 
     private void RemoveDeferredArtworkFromTracker(Image image, DeferredArtworkLoad state)
@@ -6289,10 +6611,10 @@ public partial class MainWindow : Window
         _deferredArtworkTrackers.Remove(viewer);
     }
 
-    private async Task LoadImageIntoAsync(Image target, string? urlOrPath, Control? fallback)
+    private async Task LoadImageIntoAsync(Image target, string? urlOrPath, Control? fallback, int decodeWidth)
     {
         Bitmap? bmp = null;
-        try { bmp = await ImageCache.LoadAsync(urlOrPath, _yt.SharedHttp, _store.ArtCacheDir).ConfigureAwait(false); }
+        try { bmp = await ImageCache.LoadAsync(urlOrPath, _yt.SharedHttp, _store.ArtCacheDir, decodeWidth).ConfigureAwait(false); }
         catch { }
         Dispatcher.UIThread.Post(() =>
         {

@@ -324,6 +324,9 @@ internal sealed class DeckState : IDisposable
     private long _playedFrames;
     private double _seekBaseSec;
     private volatile bool _sourceEof;
+    private Exception? _sourceReadError;
+    private int _readErrorHandled;
+    private int _endNotificationSent;
     private int _seekGeneration;
     private bool _pendingSeek;
     private double _pendingSeekSeconds;
@@ -332,6 +335,14 @@ internal sealed class DeckState : IDisposable
     public ResolvedStream? StreamInfo { get; }
     public float NormalizationGain { get; }
     public double FadeGain { get; set; } = 1.0;
+    public Exception? SourceReadError => Volatile.Read(ref _sourceReadError);
+    public bool TryMarkReadErrorHandled() => Interlocked.Exchange(ref _readErrorHandled, 1) == 0;
+    public bool TryMarkEndNotificationSent() => Interlocked.Exchange(ref _endNotificationSent, 1) == 0;
+
+    private void SetSourceReadError(Exception error)
+    {
+        Interlocked.CompareExchange(ref _sourceReadError, error, null);
+    }
 
     public DeckState(
         TrackItem track,
@@ -407,11 +418,11 @@ internal sealed class DeckState : IDisposable
                         }
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
                     lock (_ringLock)
                     {
-                        if (generation == _seekGeneration) _sourceEof = true;
+                        if (generation == _seekGeneration) SetSourceReadError(ex);
                     }
                 }
 
@@ -429,29 +440,39 @@ internal sealed class DeckState : IDisposable
             }
 
             int n = 0;
+            Exception? readError = null;
             try
             {
                 lock (_providerLock)
                     n = _provider.Read(scratch, 0, scratch.Length);
             }
-            catch
+            catch (Exception ex)
             {
-                n = 0;
+                readError = ex;
             }
 
             lock (_ringLock)
             {
                 if (generation != _seekGeneration)
                     continue; // discard stale audio after a seek that arrived during the read
-                if (n <= 0)
+                if (_sourceEof)
+                    continue; // a duration cap/end may have been reached while the provider read was in flight
+                if (readError is not null)
                 {
-                    _sourceEof = true;
+                    // A failed decoder/network read is not EOF. Let AudioEngine pause and report it;
+                    // returning zero here would make the queue mistake a broken stream for a finished song.
+                    SetSourceReadError(readError);
+                }
+                else if (n <= 0)
+                {
+                    _sourceEof = true; // only a clean zero-byte provider read is a real track end
                 }
                 else
                 {
                     WriteToRingLocked(scratch, n);
                 }
             }
+            if (readError is not null) break;
         }
     }
 
@@ -471,7 +492,11 @@ internal sealed class DeckState : IDisposable
         get
         {
             lock (_ringLock)
-                return _seekBaseSec + (double)_playedFrames / EchoMasterMixer.SampleRate;
+            {
+                double position = _seekBaseSec + (double)_playedFrames / EchoMasterMixer.SampleRate;
+                double duration = DurationSeconds;
+                return duration > 0 ? Math.Clamp(position, 0, duration) : Math.Max(0, position);
+            }
         }
     }
 
@@ -487,6 +512,24 @@ internal sealed class DeckState : IDisposable
     }
 
     public double BufferedFraction => _httpStream?.BufferedFraction ?? 1.0;
+    public int BufferedSampleFloats { get { lock (_ringLock) return _availableFloats; } }
+
+    public async Task<bool> WaitForUsableAudioAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        const int minimumBufferedFloats = EchoMasterMixer.SampleRate / 10 * EchoMasterMixer.Channels; // 100 ms of decoded stereo PCM
+        var timer = Stopwatch.StartNew();
+        while (timer.Elapsed < timeout)
+        {
+            lock (_ringLock)
+            {
+                if (_availableFloats >= minimumBufferedFloats) return true;
+                if (_sourceEof || _sourceReadError is not null) return false;
+            }
+            await Task.Delay(15, ct).ConfigureAwait(false);
+        }
+        lock (_ringLock)
+            return _availableFloats >= minimumBufferedFloats;
+    }
 
     public bool IsFinished
     {
@@ -499,7 +542,9 @@ internal sealed class DeckState : IDisposable
 
     public void Seek(double seconds)
     {
-        double clamped = Math.Max(0, DurationSeconds > 0 ? Math.Min(seconds, DurationSeconds - 0.1) : seconds);
+        if (!double.IsFinite(seconds)) seconds = 0;
+        double duration = DurationSeconds;
+        double clamped = Math.Max(0, duration > 0 ? Math.Min(seconds, Math.Max(0, duration - 0.1)) : seconds);
         lock (_ringLock)
         {
             _seekGeneration++;
@@ -509,6 +554,7 @@ internal sealed class DeckState : IDisposable
             _playedFrames = 0;
             _seekBaseSec = clamped;
             _sourceEof = false;
+            Interlocked.Exchange(ref _endNotificationSent, 0);
             _pendingSeekSeconds = clamped;
             _pendingSeek = true;
         }
@@ -522,6 +568,23 @@ internal sealed class DeckState : IDisposable
     {
         lock (_ringLock)
         {
+            double duration = DurationSeconds;
+            double position = _seekBaseSec + (double)_playedFrames / EchoMasterMixer.SampleRate;
+            long allowedFloats = long.MaxValue;
+            if (duration > 0)
+            {
+                double remainingFrames = Math.Floor(Math.Max(0, duration - position) * EchoMasterMixer.SampleRate);
+                allowedFloats = (long)Math.Min(int.MaxValue, remainingFrames * EchoMasterMixer.Channels);
+                allowedFloats -= allowedFloats % EchoMasterMixer.Channels;
+                if (allowedFloats <= 0)
+                {
+                    _sourceEof = true;
+                    _availableFloats = 0;
+                    _readPos = _writePos;
+                    return 0;
+                }
+            }
+
             if (_availableFloats == 0)
             {
                 if (_sourceEof) return 0; // True end of song!
@@ -530,7 +593,7 @@ internal sealed class DeckState : IDisposable
                 return count;
             }
 
-            int take = Math.Min(count, _availableFloats);
+            int take = (int)Math.Min(Math.Min(count, _availableFloats), allowedFloats);
             int first = Math.Min(take, RingCapacityFloats - _readPos);
             Array.Copy(_ring, _readPos, buffer, offset, first);
             if (take > first)
@@ -540,6 +603,14 @@ internal sealed class DeckState : IDisposable
             _availableFloats -= take;
             _playedFrames += take / EchoMasterMixer.Channels;
 
+            bool reachedKnownDuration = duration > 0
+                && _seekBaseSec + (double)_playedFrames / EchoMasterMixer.SampleRate >= duration - 0.5 / EchoMasterMixer.SampleRate;
+            if (reachedKnownDuration)
+            {
+                _sourceEof = true;
+                _availableFloats = 0; // discard decoded padding past the declared end
+                _readPos = _writePos;
+            }
             if (take < count)
                 Array.Clear(buffer, offset + take, count - take);
             return _sourceEof ? take : count;
@@ -692,7 +763,7 @@ public sealed class EchoMasterMixer : ISampleProvider
     public bool PitchLockSpeed { get; set; }
     public bool AmbientReverb { get; set; }
     public float ReverbMix { get; set; } = 0.24f;
-    public event Action? PrimaryTrackEnded;
+    internal event Action<DeckState>? PrimaryTrackEnded;
 
     private int _testChimeSamplesLeft;
     private int _testChimeTotalSamples;
@@ -846,7 +917,10 @@ public sealed class EchoMasterMixer : ISampleProvider
         if (producedSamples == 0)
         {
             DecaySpectrum();
-            Task.Run(() => PrimaryTrackEnded?.Invoke());
+            // The hardware callback can observe EOF many times before the async queue handler runs.
+            // Signal once per deck and carry the deck identity so a stale callback cannot advance a new track.
+            if (primary.IsFinished && primary.TryMarkEndNotificationSent())
+                Task.Run(() => PrimaryTrackEnded?.Invoke(primary));
             return count;
         }
 
@@ -1226,9 +1300,12 @@ public sealed class AudioEngine : IDisposable
     public List<(int Id, string Name)> GetOutputDevices() => Win32WaveOut16Player.EnumerateDevices();
     private CancellationTokenSource? _loadCts;
     private readonly object _loadStateLock = new();
+    private readonly PlaybackCutoffGuard _playbackCutoffGuard = new();
+    private DeckState? _cutoffExhaustedDeck;
     private int _trackLoadGeneration;
     private Task<DeckState?>? _prewarmedNextTask;
     private string? _prewarmedNextId;
+    private readonly SemaphoreSlim _nextAdvanceGate = new(1, 1);
     private string? _lightPrewarmNextId;
     private bool _crossfadeTriggeredForTrack;
     private DeckState? _historyDeck;
@@ -1334,9 +1411,25 @@ public sealed class AudioEngine : IDisposable
     private readonly object _deviceLock = new();
     private readonly object _deviceChangeDebounceLock = new();
     private readonly SemaphoreSlim _outputFlushGate = new(1, 1);
+    private readonly object _playbackDiagnosticsLock = new();
     private DateTimeOffset _lastDeviceHealAttempt = DateTimeOffset.MinValue;
     private WindowsAudioEndpointWatcher? _audioEndpointWatcher;
     private CancellationTokenSource? _deviceChangeDebounce;
+
+    private void WritePlaybackDiagnostic(string message)
+    {
+        try
+        {
+            lock (_playbackDiagnosticsLock)
+            {
+                var path = Path.Combine(_store.DataDir, "PlaybackDiagnostics.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 512 * 1024)
+                    File.WriteAllText(path, $"[{DateTimeOffset.Now:O}] rotated previous diagnostics\n");
+                File.AppendAllText(path, $"[{DateTimeOffset.Now:O}] {message}{Environment.NewLine}");
+            }
+        }
+        catch { /* Diagnostics must never interfere with playback. */ }
+    }
 
     private void InitializeOutputBackend()
     {
@@ -1535,9 +1628,33 @@ public sealed class AudioEngine : IDisposable
             return;
         }
 
-        // Gapless pre-warm & Crossfade check
+        // A decoder/range-read failure is not natural EOF. Pause the current song and surface
+        // the error rather than letting the empty ring trigger automatic queue advancement.
         var deck = _mixer.PrimaryDeck;
         if (deck is null) return;
+        if (deck.SourceReadError is { } readError)
+        {
+            if (deck.TryMarkReadErrorHandled())
+            {
+                bool isCurrentDeck;
+                lock (_loadStateLock)
+                {
+                    isCurrentDeck = !IsLoading && ReferenceEquals(_mixer.PrimaryDeck, deck);
+                    if (isCurrentDeck)
+                    {
+                        _mixer.IsPaused = true;
+                        LastError = $"Playback paused after a stream read error: {readError.Message}";
+                    }
+                }
+                if (isCurrentDeck)
+                {
+                    FlushQueuedOutputDeferred();
+                    ToastRequested?.Invoke("Stream interrupted; playback paused instead of skipping. Press Play to retry.");
+                    StateChanged?.Invoke();
+                }
+            }
+            return;
+        }
         RecordCurrentHistoryIfAny(forceUpdate: false);
         if (_mixer.IsPaused) return;
         double dur = deck.DurationSeconds;
@@ -1782,9 +1899,16 @@ public sealed class AudioEngine : IDisposable
             return;
         }
         bool pause = !_mixer.IsPaused;
-        _mixer.IsPaused = pause;
-        if (pause) FlushQueuedOutput();
-        StateChanged?.Invoke();
+        if (pause)
+        {
+            _mixer.IsPaused = true;
+            FlushQueuedOutput();
+            StateChanged?.Invoke();
+        }
+        else
+        {
+            Resume(); // reloads the same track if its source previously failed
+        }
     }
 
     private void FlushQueuedOutputDeferred()
@@ -1821,11 +1945,15 @@ public sealed class AudioEngine : IDisposable
 
     public void Resume()
     {
-        if (!IsLoading && _mixer.PrimaryDeck is not null)
+        if (IsLoading || _mixer.PrimaryDeck is not { } deck) return;
+        if (deck.SourceReadError is not null || ReferenceEquals(deck, _cutoffExhaustedDeck))
         {
-            _mixer.IsPaused = false;
-            StateChanged?.Invoke();
+            _cutoffExhaustedDeck = null;
+            _ = LoadCurrentTrackAsync(forceStreamRefresh: true); // a manual retry refreshes the URL and decoder
+            return;
         }
+        _mixer.IsPaused = false;
+        StateChanged?.Invoke();
     }
 
     public void Stop()
@@ -1935,39 +2063,44 @@ public sealed class AudioEngine : IDisposable
 
     public async Task NextAsync()
     {
-        if (Queue.Count == 0) return;
-        RecordCurrentHistoryIfAny();
+        if (!await _nextAdvanceGate.WaitAsync(0).ConfigureAwait(false)) return;
+        try
+        {
+            if (Queue.Count == 0) return;
+            RecordCurrentHistoryIfAny();
 
-        if (CurrentIndex + 1 < Queue.Count)
-        {
-            CurrentIndex++;
-            await LoadCurrentTrackAsync();
-            return;
-        }
-        if (Repeat == RepeatMode.All)
-        {
-            CurrentIndex = 0;
-            await LoadCurrentTrackAsync();
-            return;
-        }
-        if (_store.Settings.AutoplayEchoBrain && CurrentTrack is { IsLocal: false } seed)
-        {
-            try
+            if (CurrentIndex + 1 < Queue.Count)
             {
-                var more = await _yt.GetRadioQueueAsync(seed.Id);
-                var fresh = more.Where(m => Queue.All(q => q.Id != m.Id) && !_store.IsTrackExcluded(m) && (!_store.Settings.HideVideoSongs || !m.IsVideo)).Take(18).ToList();
-                if (fresh.Count > 0)
-                {
-                    Queue.AddRange(fresh);
-                    CurrentIndex++;
-                    await LoadCurrentTrackAsync();
-                    return;
-                }
+                CurrentIndex++;
+                await LoadCurrentTrackAsync();
+                return;
             }
-            catch { }
+            if (Repeat == RepeatMode.All)
+            {
+                CurrentIndex = 0;
+                await LoadCurrentTrackAsync();
+                return;
+            }
+            if (_store.Settings.AutoplayEchoBrain && CurrentTrack is { IsLocal: false } seed)
+            {
+                try
+                {
+                    var more = await _yt.GetRadioQueueAsync(seed.Id);
+                    var fresh = more.Where(m => Queue.All(q => q.Id != m.Id) && !_store.IsTrackExcluded(m) && (!_store.Settings.HideVideoSongs || !m.IsVideo)).Take(18).ToList();
+                    if (fresh.Count > 0)
+                    {
+                        Queue.AddRange(fresh);
+                        CurrentIndex++;
+                        await LoadCurrentTrackAsync();
+                        return;
+                    }
+                }
+                catch { }
+            }
+            Pause();
+            Seek(0);
         }
-        Pause();
-        Seek(0);
+        finally { _nextAdvanceGate.Release(); }
     }
 
     public async Task PreviousAsync()
@@ -1984,8 +2117,49 @@ public sealed class AudioEngine : IDisposable
         await LoadCurrentTrackAsync();
     }
 
-    private void OnPrimaryTrackEnded()
+    private void OnPrimaryTrackEnded(DeckState endedDeck)
     {
+        if (IsLoading || !ReferenceEquals(_mixer.PrimaryDeck, endedDeck) || !endedDeck.IsFinished) return;
+
+        // Catalog duration is canonical; the media-container duration is an additional lower bound.
+        // If either says the song should still be playing, refresh/retry this track instead of skipping it.
+        double endedAtSeconds = endedDeck.PositionSeconds;
+        double sourceDurationSeconds = endedDeck.DurationSeconds;
+        var cutoffDecision = _playbackCutoffGuard.Evaluate(
+            endedDeck.Track.Id,
+            endedAtSeconds,
+            endedDeck.Track.DurationSeconds,
+            sourceDurationSeconds,
+            out double expectedDurationSeconds,
+            out int retryAttempt);
+        WritePlaybackDiagnostic($"EOF id={endedDeck.Track.Id} mime={endedDeck.StreamInfo?.MimeType ?? "local"} played={endedAtSeconds:0.000}s catalog={endedDeck.Track.DurationSeconds:0.000}s source={sourceDurationSeconds:0.000}s expected={expectedDurationSeconds:0.000}s decision={cutoffDecision} retry={retryAttempt}");
+        if (cutoffDecision == TrackEndDecision.RetryStream)
+        {
+            _ = RecoverPrematureCutoffAsync(endedDeck, endedDeck.PositionSeconds, expectedDurationSeconds, retryAttempt);
+            return;
+        }
+        if (cutoffDecision == TrackEndDecision.StopAfterRetries)
+        {
+            bool isCurrentDeck;
+            lock (_loadStateLock)
+            {
+                isCurrentDeck = !IsLoading && ReferenceEquals(_mixer.PrimaryDeck, endedDeck);
+                if (isCurrentDeck)
+                {
+                    _mixer.IsPaused = true;
+                    _cutoffExhaustedDeck = endedDeck;
+                    LastError = $"The stream ended early at {endedDeck.PositionSeconds:0.0}s of about {expectedDurationSeconds:0}s. Playback was stopped instead of skipping.";
+                }
+            }
+            if (isCurrentDeck)
+            {
+                FlushQueuedOutputDeferred();
+                ToastRequested?.Invoke("Stream ended early after retries; playback stopped instead of skipping. Press Play to retry.");
+                StateChanged?.Invoke();
+            }
+            return;
+        }
+
         if (_sleepEndOfTrack)
         {
             _sleepEndOfTrack = false;
@@ -1993,14 +2167,38 @@ public sealed class AudioEngine : IDisposable
             ToastRequested?.Invoke("Sleep timer paused at end of track");
             return;
         }
-        if (Repeat == RepeatMode.One && _mixer.PrimaryDeck is not null)
+        if (Repeat == RepeatMode.One && ReferenceEquals(_mixer.PrimaryDeck, endedDeck))
         {
             RecordCurrentHistoryIfAny();
             Seek(0);
             Resume();
             return;
         }
-        _ = NextAsync();
+        if (ReferenceEquals(_mixer.PrimaryDeck, endedDeck))
+            _ = NextAsync();
+    }
+
+    private async Task RecoverPrematureCutoffAsync(
+        DeckState endedDeck,
+        double resumePositionSeconds,
+        double expectedDurationSeconds,
+        int retryAttempt)
+    {
+        lock (_loadStateLock)
+        {
+            if (IsLoading || !ReferenceEquals(_mixer.PrimaryDeck, endedDeck)) return;
+            _mixer.IsPaused = true;
+            LastError = null;
+        }
+        FlushQueuedOutputDeferred();
+        ToastRequested?.Invoke($"The stream ended early; refreshing it and retrying this track ({retryAttempt}/2).");
+        // A fresh resolver pass avoids reusing an expired/partial cached media URL. Keep the retry
+        // count across these internal reloads and resume near the last audible position.
+        await LoadCurrentTrackAsync(
+            forceStreamRefresh: true,
+            resumePositionSeconds: Math.Max(0, Math.Min(resumePositionSeconds, expectedDurationSeconds)),
+            preserveCutoffRetries: true,
+            preferWebmOpusOverride: retryAttempt % 2 == 1);
     }
 
     private async Task PerformCrossfadeAdvanceAsync(int nextIdx, int xfadeSec)
@@ -2082,10 +2280,21 @@ public sealed class AudioEngine : IDisposable
         }, CancellationToken.None);
     }
 
-    private async Task LoadCurrentTrackAsync()
+    private async Task LoadCurrentTrackAsync(
+        bool forceStreamRefresh = false,
+        double resumePositionSeconds = 0,
+        bool preserveCutoffRetries = false,
+        bool? preferWebmOpusOverride = null)
     {
         var track = CurrentTrack;
         if (track is null) return;
+        bool preferWebmOpus = preferWebmOpusOverride ?? !OperatingSystem.IsWindows();
+        WritePlaybackDiagnostic($"LOAD id={track.Id} trackDuration={track.DurationSeconds}s forceRefresh={forceStreamRefresh} recovery={preserveCutoffRetries} codecPreference={(preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation")}");
+        if (!preserveCutoffRetries)
+        {
+            _playbackCutoffGuard.Reset(track.Id);
+            _cutoffExhaustedDeck = null;
+        }
 
         CancellationTokenSource cts;
         int generation;
@@ -2125,14 +2334,23 @@ public sealed class AudioEngine : IDisposable
         try
         {
             DeckState? newDeck = null;
-            if (_prewarmedNextId == track.Id && _prewarmedNextTask is not null)
+            if (!forceStreamRefresh && _prewarmedNextId == track.Id && _prewarmedNextTask is not null)
             {
                 try { newDeck = await _prewarmedNextTask; } catch { newDeck = null; }
                 _prewarmedNextId = null;
                 _prewarmedNextTask = null;
             }
 
-            newDeck ??= await BuildDeckAsync(track, ct);
+            // Deck construction includes synchronous WebM parsing and a synchronous startup
+            // prefill. Keep that work off Avalonia's UI dispatcher, especially for range-backed streams.
+            newDeck ??= await Task.Run(() => BuildDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus), ct);
+            if (newDeck is not null)
+                WritePlaybackDiagnostic($"DECK id={track.Id} mime={newDeck.StreamInfo?.MimeType ?? "local"} client={newDeck.StreamInfo?.ClientName ?? "local"} duration={newDeck.DurationSeconds:0.000}s");
+            if (newDeck is not null && resumePositionSeconds > 0)
+            {
+                var deckToSeek = newDeck;
+                await Task.Run(() => deckToSeek.Seek(resumePositionSeconds), ct);
+            }
 
             bool stale;
             lock (_loadStateLock)
@@ -2196,7 +2414,7 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
-    private async Task<DeckState?> BuildDeckAsync(TrackItem track, CancellationToken ct)
+    private async Task<DeckState?> BuildDeckAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh = false, bool? preferWebmOpusOverride = null)
     {
         // 1. Local file or Offline Downloaded file?
         string? offlinePath = track.LocalFilePath ?? _store.TryGetDownloadedFilePath(track.Id);
@@ -2219,8 +2437,81 @@ public sealed class AudioEngine : IDisposable
             }
         }
 
-        // 2. Online YouTube Music Stream: resolve & byte-verify via VISIONOS -> ANDROID_VR -> IOS -> PIPED
-        var verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: true, forceRefresh: false, ct);
+        bool preferWebmOpus = preferWebmOpusOverride ?? !OperatingSystem.IsWindows();
+        if (OperatingSystem.IsWindows())
+            return await BuildWindowsCodecRaceAsync(track, ct, forceStreamRefresh, preferWebmOpus);
+        return await BuildOnlineDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus);
+    }
+
+    private async Task<DeckState?> BuildWindowsCodecRaceAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus)
+    {
+        using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        WritePlaybackDiagnostic($"CODEC_RACE start id={track.Id} first={(preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation")} second={(preferWebmOpus ? "AAC/MediaFoundation" : "WebM/Opus")}");
+        var first = BuildReadyCodecCandidateAsync(track, preferWebmOpus, forceStreamRefresh, raceCts.Token);
+        var second = BuildReadyCodecCandidateAsync(track, !preferWebmOpus, forceStreamRefresh, raceCts.Token);
+        var pending = new List<Task<DeckState?>> { first, second };
+        var failures = new List<Exception>();
+
+        while (pending.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var finished = await Task.WhenAny(pending);
+            pending.Remove(finished);
+            try
+            {
+                var deck = await finished;
+                if (deck is not null)
+                {
+                    WritePlaybackDiagnostic($"CODEC_RACE winner id={track.Id} mime={deck.StreamInfo?.MimeType ?? "unknown"} bufferedFloats={deck.BufferedSampleFloats}");
+                    raceCts.Cancel();
+                    foreach (var loser in pending)
+                        _ = DisposeCandidateWhenFinishedAsync(loser);
+                    return deck;
+                }
+                WritePlaybackDiagnostic($"CODEC_RACE rejected id={track.Id} candidate={(finished == first ? (preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation") : (preferWebmOpus ? "AAC/MediaFoundation" : "WebM/Opus"))} reason=no-usable-decoded-audio");
+            }
+            catch (OperationCanceledException) when (raceCts.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                failures.Add(ex);
+                WritePlaybackDiagnostic($"CODEC_RACE error id={track.Id} candidate={(finished == first ? (preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation") : (preferWebmOpus ? "AAC/MediaFoundation" : "WebM/Opus"))} error={ex.GetType().Name}:{ex.Message}");
+            }
+        }
+
+        ct.ThrowIfCancellationRequested();
+        if (failures.Count > 0)
+            throw new AggregateException("Neither AAC/MP4 nor WebM/Opus produced usable decoded audio.", failures);
+        throw new InvalidDataException("Neither AAC/MP4 nor WebM/Opus produced usable decoded audio.");
+    }
+
+    private async Task<DeckState?> BuildReadyCodecCandidateAsync(TrackItem track, bool preferWebmOpus, bool forceStreamRefresh, CancellationToken ct)
+    {
+        DeckState? deck = await BuildOnlineDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus);
+        if (deck is null) return null;
+        try
+        {
+            if (await deck.WaitForUsableAudioAsync(TimeSpan.FromSeconds(2), ct))
+                return deck;
+        }
+        catch
+        {
+            deck.Dispose();
+            throw;
+        }
+        deck.Dispose();
+        return null;
+    }
+
+    private static async Task DisposeCandidateWhenFinishedAsync(Task<DeckState?> candidate)
+    {
+        try { (await candidate.ConfigureAwait(false))?.Dispose(); }
+        catch { /* Failed/cancelled loser candidates have no deck to dispose. */ }
+    }
+
+    private async Task<DeckState?> BuildOnlineDeckAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus)
+    {
+        // Online YouTube Music stream: resolve and byte-verify via the configured client fallback chain.
+        var verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: preferWebmOpus, forceRefresh: forceStreamRefresh, ct);
         var resolved = verified.Stream;
         var httpStream = new BoundedRangeHttpStream(_yt.SharedHttp, resolved, verified.InitialPage0);
 
@@ -2236,6 +2527,8 @@ public sealed class AudioEngine : IDisposable
                 httpStream.Dispose();
                 // Automatic Windows MediaFoundation AAC (itag 140) fallback if WebM header was unusual
                 var mp4Verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: false, forceRefresh: true, ct);
+                if (!mp4Verified.Stream.MimeType.Contains("mp4", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The WebM/Opus stream could not be opened and no AAC/MP4 fallback is available.");
                 var mp4Stream = new BoundedRangeHttpStream(_yt.SharedHttp, mp4Verified.Stream, mp4Verified.InitialPage0);
                 var mf = new StreamMediaFoundationReader(mp4Stream);
                 ISampleProvider sp = mf.ToSampleProvider();
@@ -2249,12 +2542,25 @@ public sealed class AudioEngine : IDisposable
         // Native Windows MediaFoundation decoder for audio/mp4 (itag 140/139)
         if (OperatingSystem.IsWindows())
         {
-            var mf = new StreamMediaFoundationReader(httpStream);
-            ISampleProvider sp = mf.ToSampleProvider();
-            if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
-            if (sp.WaveFormat.SampleRate != EchoMasterMixer.SampleRate)
-                sp = new WdlResamplingSampleProvider(sp, EchoMasterMixer.SampleRate);
-            return new DeckState(track, sp, mf, null, null, httpStream, resolved);
+            try
+            {
+                var mf = new StreamMediaFoundationReader(httpStream);
+                ISampleProvider sp = mf.ToSampleProvider();
+                if (sp.WaveFormat.Channels == 1) sp = new MonoToStereoSampleProvider(sp);
+                if (sp.WaveFormat.SampleRate != EchoMasterMixer.SampleRate)
+                    sp = new WdlResamplingSampleProvider(sp, EchoMasterMixer.SampleRate);
+                return new DeckState(track, sp, mf, null, null, httpStream, resolved);
+            }
+            catch when (!preferWebmOpus)
+            {
+                httpStream.Dispose();
+                var opusVerified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: true, forceRefresh: true, ct);
+                if (!opusVerified.Stream.MimeType.Contains("webm", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Media Foundation could not open AAC and no WebM/Opus fallback is available.");
+                var opusStream = new BoundedRangeHttpStream(_yt.SharedHttp, opusVerified.Stream, opusVerified.InitialPage0);
+                var webm = new WebmOpusSampleSource(opusStream, opusVerified.Stream.DurationSeconds, ownsStream: true);
+                return new DeckState(track, webm, webm, webm, null, opusStream, opusVerified.Stream);
+            }
         }
 
         httpStream.Dispose();

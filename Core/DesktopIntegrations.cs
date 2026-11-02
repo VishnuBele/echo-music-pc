@@ -863,7 +863,7 @@ public static class Win32TaskbarIconHelper
 
 public static class DynamicConfigService
 {
-    public const string CurrentAppVersion = "2.0.3";
+    public const string CurrentAppVersion = "2.0.4";
 
     public static void ApplyOverridesIfPresent(string dataDir)
     {

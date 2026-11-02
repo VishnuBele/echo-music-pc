@@ -325,7 +325,7 @@ public sealed class StreamResolver
         };
     }
 
-    private static List<JsonObject> RankCandidateFormats(JsonArray formats, string quality, bool preferWebmOpus)
+    internal static List<JsonObject> RankCandidateFormats(JsonArray formats, string quality, bool preferWebmOpus)
     {
         int ceiling = quality switch
         {
@@ -345,23 +345,23 @@ public sealed class StreamResolver
             candidates.Add(f);
         }
 
-        // Pick the highest-rate playable stream at or below the requested ceiling. If YouTube
-        // does not provide a stream below that ceiling, choose the closest available rate instead
-        // of accidentally jumping to the highest rate in Data Saver mode. Codec efficiency only
-        // breaks equal-bitrate ties; Opus is not inherently a lower-quality format.
+        // Honor the platform's decoder preference first (Media Foundation AAC on Windows,
+        // managed WebM/Opus elsewhere), then apply the requested bitrate ceiling within that
+        // codec family. This avoids selecting a slightly higher-rate codec the active platform
+        // decoder cannot actually turn into samples.
         var withinCeiling = candidates
             .Where(f => (f["bitrate"]?.GetValue<int>() ?? 0) <= ceiling)
             .ToList();
         var pool = withinCeiling.Count > 0 ? withinCeiling : candidates;
         bool chooseLowest = quality == "DataSaver" && withinCeiling.Count == 0;
         return pool
-            .OrderBy(f => chooseLowest ? (f["bitrate"]?.GetValue<int>() ?? 0) : -(f["bitrate"]?.GetValue<int>() ?? 0))
-            .ThenByDescending(f =>
+            .OrderBy(f =>
             {
                 var m = f["mimeType"]?.GetValue<string>() ?? "";
                 bool isOpus = m.Contains("webm", StringComparison.OrdinalIgnoreCase) && m.Contains("opus", StringComparison.OrdinalIgnoreCase);
-                return preferWebmOpus == isOpus ? 1 : 0;
+                return preferWebmOpus == isOpus ? 0 : 1;
             })
+            .ThenBy(f => chooseLowest ? (f["bitrate"]?.GetValue<int>() ?? 0) : -(f["bitrate"]?.GetValue<int>() ?? 0))
             .ToList();
     }
 }
@@ -426,18 +426,34 @@ public sealed class BoundedRangeHttpStream : Stream
 
                 using var res = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
                 if (res.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-                    return (Array.Empty<byte>(), start);
-                if (res.StatusCode != HttpStatusCode.PartialContent && !res.IsSuccessStatusCode)
+                {
+                    long actualLength = res.Content.Headers.ContentRange?.Length ?? knownLength;
+                    return (Array.Empty<byte>(), actualLength > 0 ? actualLength : start);
+                }
+                if (res.StatusCode != HttpStatusCode.PartialContent && res.StatusCode != HttpStatusCode.OK)
                     throw new HttpRequestException($"Stream range HTTP {(int)res.StatusCode}");
 
-                long total = knownLength;
-                if (res.Content.Headers.ContentRange?.Length is long crLen && crLen > 0)
-                    total = crLen;
-                else if (total <= 0 && res.Content.Headers.ContentLength is long cl)
-                    total = start + cl;
-
                 var bytes = await res.Content.ReadAsByteArrayAsync(ct);
-                return (bytes, total);
+                if (res.StatusCode == HttpStatusCode.PartialContent)
+                {
+                    if (res.Content.Headers.ContentRange?.From is long actualStart && actualStart != start)
+                        throw new IOException($"Server returned range starting at {actualStart}, expected {start}.");
+                    long total = res.Content.Headers.ContentRange?.Length ?? knownLength;
+                    if (total <= 0 && res.Content.Headers.ContentLength is long cl)
+                        total = start + cl;
+                    return (bytes, total);
+                }
+
+                // Some media proxies silently ignore Range and return 200 with the whole file.
+                // Slice that body to the requested page instead of replaying page zero as later audio.
+                long fullLength = res.Content.Headers.ContentLength ?? (long)bytes.Length;
+                if (start >= fullLength || start >= bytes.LongLength)
+                    return (Array.Empty<byte>(), fullLength);
+                int offset = checked((int)start);
+                int pageLength = Math.Min(PageSize, bytes.Length - offset);
+                var page = new byte[pageLength];
+                Buffer.BlockCopy(bytes, offset, page, 0, pageLength);
+                return (page, fullLength);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -452,23 +468,53 @@ public sealed class BoundedRangeHttpStream : Stream
         throw lastEx ?? new IOException("Failed reading stream range.");
     }
 
+    private byte[] GetOrFetchPageWithRetry(int pageIndex)
+    {
+        Exception? lastError = null;
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try { return GetOrFetchPage(pageIndex); }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                if (attempt < 2) Thread.Sleep(150 * (attempt + 1));
+            }
+        }
+        throw new IOException($"Unable to read audio range page {pageIndex} after retries.", lastError);
+    }
+
     private byte[] GetOrFetchPage(int pageIndex)
     {
+        long start = (long)pageIndex * PageSize;
         lock (_sync)
         {
             if (_pages.TryGetValue(pageIndex, out var hit))
             {
-                TriggerPrefetch(pageIndex + 1);
-                if (!ResourceSaverState.IsActive) TriggerPrefetch(pageIndex + 2);
-                return hit;
+                long expected = _length > 0 ? Math.Min(PageSize, Math.Max(0, _length - start)) : PageSize;
+                if (hit.Length >= expected)
+                {
+                    TriggerPrefetch(pageIndex + 1);
+                    if (!ResourceSaverState.IsActive) TriggerPrefetch(pageIndex + 2);
+                    return hit;
+                }
+                // Never interpret a partial cached/prefetched page as the end of the track.
+                _pages.Remove(pageIndex);
             }
         }
 
-        var (data, total) = FetchPageStaticAsync(_http, _url, _userAgent, pageIndex, _length, CancellationToken.None, _mediaOrigin)
+        long knownLength;
+        lock (_sync) knownLength = _length;
+        var (data, total) = FetchPageStaticAsync(_http, _url, _userAgent, pageIndex, knownLength, CancellationToken.None, _mediaOrigin)
             .GetAwaiter().GetResult();
         lock (_sync)
         {
-            if (total > _length) _length = total;
+            if (total > 0) _length = total;
+            long expected = _length > 0 ? Math.Min(PageSize, Math.Max(0, _length - start)) : PageSize;
+            if (data.Length < expected)
+            {
+                if (expected == 0 && start >= _length) return Array.Empty<byte>();
+                throw new IOException($"Short audio range page {pageIndex}: received {data.Length} of {expected} bytes.");
+            }
             int pageCapacity = ResourceSaverState.IsActive ? 6 : 36; // ~3 MiB vs ~18 MiB per active track
             while (_pages.Count >= pageCapacity)
             {
@@ -544,16 +590,12 @@ public sealed class BoundedRangeHttpStream : Stream
         {
             int pageIdx = (int)(_position / PageSize);
             int pageOff = (int)(_position % PageSize);
-            byte[] page;
-            try
+            byte[] page = GetOrFetchPageWithRetry(pageIdx);
+            if (page.Length == 0 || pageOff >= page.Length)
             {
-                page = GetOrFetchPage(pageIdx);
+                if (_position >= _length) break; // confirmed end of the entity
+                throw new IOException($"Unexpected end of audio range at byte {_position} of {_length}.");
             }
-            catch
-            {
-                break; // never crash real-time decoder
-            }
-            if (page.Length == 0 || pageOff >= page.Length) break;
             int avail = Math.Min(count, page.Length - pageOff);
             Buffer.BlockCopy(page, pageOff, buffer, offset, avail);
             _position += avail;

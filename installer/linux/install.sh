@@ -11,9 +11,11 @@ if [ ! -f "$HERE/EchoMusic" ]; then
   echo "EchoMusic executable is missing. Extract the complete Linux archive first." >&2
   exit 1
 fi
-if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft.NETCore.App 8\.'; then
-  echo "Echo Music Linux requires the .NET 8 runtime. Install Microsoft.NETCore.App 8.0, then run this installer again." >&2
-  exit 1
+if [ ! -f "$HERE/.self-contained" ]; then
+  if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft.NETCore.App 8\.'; then
+    echo "Echo Music Linux requires the .NET 8 runtime. Install Microsoft.NETCore.App 8.0, then run this installer again." >&2
+    exit 1
+  fi
 fi
 mkdir -p "$INSTALL_DIR" "$APPLICATIONS_DIR" "$ICON_DIR"
 cp -a "$HERE/." "$INSTALL_DIR/"

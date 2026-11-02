@@ -277,6 +277,148 @@ public sealed class MusicDnaAndExtras
 
     // --------------------------------------------------------- 3. Spotify Public URL Importer (Zero API Key!)
 
+    private static string NormalizeMatchText(string value)
+    {
+        var normalized = Regex.Replace((value ?? "").ToLowerInvariant(), @"[^\p{L}\p{N}]+", " ").Trim();
+        return Regex.Replace(normalized, @"\b(official|audio|video|lyrics?|visualizer|hd|4k|explicit|clean|feat|ft)\b", " ").Trim();
+    }
+
+    private static double TextMatchScore(string expected, string actual)
+    {
+        var e = NormalizeMatchText(expected).Split(' ', StringSplitOptions.RemoveEmptyEntries).Distinct().ToHashSet(StringComparer.Ordinal);
+        var a = NormalizeMatchText(actual).Split(' ', StringSplitOptions.RemoveEmptyEntries).Distinct().ToHashSet(StringComparer.Ordinal);
+        if (e.Count == 0 || a.Count == 0) return 0;
+        int overlap = e.Intersect(a).Count();
+        double coverage = (double)overlap / e.Count;
+        double jaccard = (double)overlap / (e.Count + a.Count - overlap);
+        return Math.Max(coverage * 0.78 + jaccard * 0.22,
+            NormalizeMatchText(actual).Contains(NormalizeMatchText(expected), StringComparison.Ordinal) && NormalizeMatchText(expected).Length >= 3 ? 0.92 : 0);
+    }
+
+    internal static TrackItem? PickSpotifyMatch((string Title, string Artist, long DurationMs) source, SearchPageResult result)
+    {
+        TrackItem? best = null;
+        double bestScore = double.NegativeInfinity;
+        string expectedTitle = source.Title;
+        string expectedArtist = source.Artist.Split(new[] { ',', ';', '&' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? source.Artist;
+        foreach (var candidate in result.Tracks.Concat(result.Videos).Where(t => !string.IsNullOrWhiteSpace(t.Id)))
+        {
+            double titleScore = TextMatchScore(expectedTitle, candidate.Title);
+            double artistScore = TextMatchScore(expectedArtist, candidate.ArtistNames);
+            // These version words materially change a track; don't quietly substitute a live/remix/cover upload.
+            string sourceNorm = NormalizeMatchText(expectedTitle);
+            string candidateNorm = NormalizeMatchText(candidate.Title);
+            bool sourceVersioned = Regex.IsMatch(sourceNorm, @"\b(live|remix|acoustic|instrumental|cover|karaoke|sped|slowed)\b");
+            bool candidateVersioned = Regex.IsMatch(candidateNorm, @"\b(live|remix|acoustic|instrumental|cover|karaoke|sped|slowed)\b");
+            if (!sourceVersioned && candidateVersioned) titleScore -= 0.20;
+            if (sourceVersioned && !candidateVersioned && !candidateNorm.Contains(sourceNorm, StringComparison.Ordinal)) titleScore -= 0.18;
+            if (titleScore < 0.58 || artistScore < 0.34) continue;
+
+            double durationScore = 0.7;
+            if (source.DurationMs > 0 && candidate.DurationSeconds > 0)
+            {
+                double delta = Math.Abs(source.DurationMs / 1000.0 - candidate.DurationSeconds);
+                double ratio = delta / Math.Max(source.DurationMs / 1000.0, candidate.DurationSeconds);
+                if (ratio > 0.40) continue;
+                durationScore = Math.Clamp(1.0 - ratio * 2.2, 0, 1);
+            }
+            double score = titleScore * 0.59 + artistScore * 0.33 + durationScore * 0.08;
+            if (score > bestScore)
+            {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private static bool TryGetYouTubeUrlParts(string rawUrl, out string playlistId, out string videoId)
+    {
+        playlistId = "";
+        videoId = "";
+        if (!Uri.TryCreate(rawUrl?.Trim(), UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("http" or "https")) return false;
+        string host = uri.Host.ToLowerInvariant();
+        if (host is not ("music.youtube.com" or "youtube.com" or "www.youtube.com" or "m.youtube.com" or "youtu.be")) return false;
+        var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string item in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var pair = item.Split('=', 2);
+            string key = Uri.UnescapeDataString(pair[0].Replace('+', ' '));
+            string value = pair.Length > 1 ? Uri.UnescapeDataString(pair[1].Replace('+', ' ')) : "";
+            if (!query.ContainsKey(key)) query[key] = value;
+        }
+        if (query.TryGetValue("list", out var list) && Regex.IsMatch(list, @"^[A-Za-z0-9_-]{10,128}$")) playlistId = list;
+        if (query.TryGetValue("v", out var video) && Regex.IsMatch(video, @"^[A-Za-z0-9_-]{11}$")) videoId = video;
+        if (host == "youtu.be")
+        {
+            string shortId = uri.AbsolutePath.Trim('/').Split('/').FirstOrDefault() ?? "";
+            if (Regex.IsMatch(shortId, @"^[A-Za-z0-9_-]{11}$")) videoId = shortId;
+        }
+        if (host == "youtube.com" || host == "www.youtube.com" || host == "music.youtube.com" || host == "m.youtube.com")
+        {
+            var pathMatch = Regex.Match(uri.AbsolutePath, @"/(?:embed|shorts)/([A-Za-z0-9_-]{11})(?:/|$)", RegexOptions.IgnoreCase);
+            if (pathMatch.Success) videoId = pathMatch.Groups[1].Value;
+        }
+        return playlistId.Length > 0 || videoId.Length > 0;
+    }
+
+    public static bool IsYouTubeHostUrl(string rawUrl) =>
+        Uri.TryCreate(rawUrl?.Trim(), UriKind.Absolute, out var uri) &&
+        (uri.Scheme is "http" or "https") &&
+        (uri.Host.ToLowerInvariant() is "music.youtube.com" or "youtube.com" or "www.youtube.com" or "m.youtube.com" or "youtu.be");
+
+    public async Task<(string Name, string Owner, List<TrackItem> Tracks)> ImportYouTubeMusicUrlAsync(
+        string url, Action<string, double>? onProgress = null, CancellationToken ct = default)
+    {
+        if (!TryGetYouTubeUrlParts(url, out string playlistId, out string videoId))
+            throw new ArgumentException("Use a public YouTube Music/YouTube playlist URL or a single song/video URL. Channel/profile URLs are not supported.");
+        if (playlistId.StartsWith("RD", StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException("YouTube auto-mix/radio links are not stable playlists. Paste a public playlist or a single song/video link instead.");
+
+        if (!string.IsNullOrEmpty(playlistId))
+        {
+            onProgress?.Invoke("Loading public YouTube Music playlist…", 0.08);
+            var page = await _yt.GetPlaylistAsync(playlistId, ct);
+            var tracks = page.Tracks.ToList();
+            var seen = new HashSet<string>(tracks.Select(t => t.Id), StringComparer.Ordinal);
+            string? continuation = page.Continuation;
+            int pages = 0;
+            while (!string.IsNullOrEmpty(continuation) && tracks.Count < 2000 && pages++ < 20)
+            {
+                ct.ThrowIfCancellationRequested();
+                var more = await _yt.GetPlaylistContinuationAsync(continuation!, ct);
+                foreach (var track in more.Tracks)
+                    if (seen.Add(track.Id)) tracks.Add(track);
+                continuation = more.Continuation;
+                onProgress?.Invoke($"Reading playlist tracks ({tracks.Count})…", Math.Min(0.85, 0.12 + tracks.Count / 2400.0));
+            }
+            if (tracks.Count == 0)
+                throw new InvalidOperationException("No public, playable tracks were found. The playlist may be private, unavailable, or a YouTube Music mix.");
+            return (string.IsNullOrWhiteSpace(page.Title) ? "YouTube Music playlist" : page.Title,
+                "", tracks);
+        }
+
+        onProgress?.Invoke("Reading public song/video details…", 0.2);
+        string watchUrl = $"https://www.youtube.com/watch?v={Uri.EscapeDataString(videoId)}";
+        string oembedUrl = "https://www.youtube.com/oembed?format=json&url=" + Uri.EscapeDataString(watchUrl);
+        using var request = new HttpRequestMessage(HttpMethod.Get, oembedUrl);
+        request.Headers.TryAddWithoutValidation("User-Agent", YouTubeClients.WebUa);
+        using var response = await _http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+        var metadata = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
+        string title = WebUtility.HtmlDecode(metadata?["title"]?.GetValue<string>() ?? "").Trim();
+        string author = WebUtility.HtmlDecode(metadata?["author_name"]?.GetValue<string>() ?? "").Trim();
+        string thumbnail = metadata?["thumbnail_url"]?.GetValue<string>() ?? "";
+        if (title.Length == 0) throw new InvalidOperationException("Could not read this public YouTube video’s title.");
+        var single = new TrackItem
+        {
+            Id = videoId, Title = title, Artists = string.IsNullOrWhiteSpace(author) ? new() : new() { new ArtistRef { Name = author } },
+            Thumbnail = thumbnail, IsVideo = true,
+        };
+        return (title, author, new List<TrackItem> { single });
+    }
+
     private static long ReadSpotifyDurationMilliseconds(JsonNode? node)
     {
         if (node is JsonObject obj)
@@ -457,7 +599,7 @@ public sealed class MusicDnaAndExtras
             {
                 var q = $"{entry.Title} {entry.Artist}".Trim();
                 var sr = await _yt.SearchAsync(q, "songs", ct: ct);
-                slots[idx] = sr.Tracks.FirstOrDefault() ?? sr.Videos.FirstOrDefault();
+                slots[idx] = PickSpotifyMatch(entry, sr);
             }
             catch { }
             finally
@@ -483,6 +625,7 @@ public sealed class MusicDnaAndExtras
         }
 
         if (collectionOwner.StartsWith("By ", StringComparison.OrdinalIgnoreCase)) collectionOwner = collectionOwner[3..].Trim();
+        onProgress?.Invoke($"Matched {matched.Count}/{rawEntries.Count}; skipped {rawEntries.Count - matched.Count} low-confidence result(s)", 1);
         _spotifyImportCache[cacheKey] = (collectionTitle, collectionOwner, matched.Select(t => t.Clone()).ToList());
         return (collectionTitle, collectionOwner, matched);
     }

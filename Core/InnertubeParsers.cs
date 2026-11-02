@@ -121,6 +121,21 @@ public static class InnertubeParsers
                 return cur >= size ? m.Value : $"=w{size}-h{size}";
             });
         }
+
+        // Match YouTube thumbnail resolution to the rendered asset. Requesting maxres for every
+        // small card caused avoidable bytes and slow/404 fallback attempts on ordinary shelves.
+        // Reserve maxres for Now Playing/fullscreen; regular cards use the standard hq variant.
+        var ytThumb = Regex.Match(url, @"^(?<prefix>https?://[^/]+/vi(?:_webp)?/[A-Za-z0-9_-]{11}/)[^/?#]+", RegexOptions.IgnoreCase);
+        if (ytThumb.Success)
+        {
+            string extension = ytThumb.Value.EndsWith(".webp", StringComparison.OrdinalIgnoreCase) ? ".webp" : ".jpg";
+            string quality = size >= 1000 ? "maxresdefault"
+                : size >= 560 ? "sddefault"
+                : size >= 320 ? "hqdefault"
+                : size >= 180 ? "mqdefault"
+                : "default";
+            url = ytThumb.Groups["prefix"].Value + quality + extension;
+        }
         return url;
     }
 

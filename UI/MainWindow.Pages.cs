@@ -525,7 +525,7 @@ public partial class MainWindow
 
             case "playlists":
                 if (_store.Playlists.Count == 0)
-                    root.Children.Add(EmptyHint("No local playlists yet. Create one or import from Spotify!"));
+                    root.Children.Add(EmptyHint("No local playlists yet. Create one or import from Spotify / YouTube Music!"));
                 else
                 {
                     var wrap = new WrapPanel { Orientation = Orientation.Horizontal };
@@ -968,14 +968,31 @@ public partial class MainWindow
     internal void RenderSpotifyImportView()
     {
         var root = new StackPanel { Spacing = 18, MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left };
-        root.Children.Add(new TextBlock { Text = "Import a Spotify Playlist (No Sign-In)", FontSize = 26, FontWeight = FontWeight.ExtraBold });
-        root.Children.Add(new TextBlock
+        root.Children.Add(new TextBlock { Text = "Import playlists & tracks", FontSize = 26, FontWeight = FontWeight.ExtraBold });
+        var importInstructions = new StackPanel { Spacing = 6 };
+        var spotifyInstructions = new StackPanel { Spacing = 2 };
+        spotifyInstructions.Children.Add(new TextBlock { Text = "Spotify", FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+        spotifyInstructions.Children.Add(new TextBlock
         {
-            Text = "Paste one Spotify link and Echo Music will detect whether it is a public profile, playlist, album, or track. Profile links show public playlists; playlist links are imported locally. You can also import a .CSV / .M3U / .M3U8 file. No login or OAuth is required; private playlists are not supported.",
-            FontSize = 13.5,
-            Foreground = ResBrush("TextSecondaryBrush"),
-            TextWrapping = TextWrapping.Wrap,
+            Text = "Paste a public playlist, album, track, or profile link (profile links show public playlists).",
+            FontSize = 13, Foreground = ResBrush("TextSecondaryBrush"), TextWrapping = TextWrapping.Wrap,
         });
+        importInstructions.Children.Add(spotifyInstructions);
+
+        var youtubeMusicInstructions = new StackPanel { Spacing = 2 };
+        youtubeMusicInstructions.Children.Add(new TextBlock { Text = "YouTube Music", FontSize = 13.5, FontWeight = FontWeight.SemiBold });
+        youtubeMusicInstructions.Children.Add(new TextBlock
+        {
+            Text = "Paste a public playlist or an individual song/video link.",
+            FontSize = 13, Foreground = ResBrush("TextSecondaryBrush"), TextWrapping = TextWrapping.Wrap,
+        });
+        importInstructions.Children.Add(youtubeMusicInstructions);
+        importInstructions.Children.Add(new TextBlock
+        {
+            Text = "Local .CSV, .M3U, and .M3U8 files are also supported. Imports work without signing in.",
+            FontSize = 13, Foreground = ResBrush("TextSecondaryBrush"), TextWrapping = TextWrapping.Wrap,
+        });
+        root.Children.Add(importInstructions);
 
         _spotifyPlaceholderTimer?.Stop();
         var urlBox = new TextBox
@@ -990,6 +1007,8 @@ public partial class MainWindow
             "https://open.spotify.com/album/your-album-id",
             "https://open.spotify.com/track/your-track-id",
             "https://open.spotify.com/user/your-username",
+            "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID",
+            "https://music.youtube.com/watch?v=VIDEO_ID",
         };
         int urlExampleIndex = 0;
         var urlPlaceholderShift = new TranslateTransform();
@@ -1050,7 +1069,7 @@ public partial class MainWindow
         var statusText = new TextBlock { FontSize = 13, Foreground = ResBrush("TextSecondaryBrush") };
 
         var btnRow = new WrapPanel();
-        var openBtn = new Button { Classes = { "accentBtn" }, Content = "Open Spotify Link", Margin = new Thickness(0, 0, 10, 8) };
+        var openBtn = new Button { Classes = { "accentBtn" }, Content = "Open Link", Margin = new Thickness(0, 0, 10, 8) };
         var csvBtn = new Button { Classes = { "pill" }, Content = "Import .CSV / .M3U File (1,000+ Songs)", Margin = new Thickness(0, 0, 10, 8) };
         var profilePanel = new StackPanel { Spacing = 12, IsVisible = false, Margin = new Thickness(0, 8, 0, 0) };
 
@@ -1064,6 +1083,28 @@ public partial class MainWindow
             profilePanel.Children.Clear();
             profilePanel.IsVisible = false;
             bool isProfile = IsSpotifyProfileUrl(spotifyUrl);
+            bool isYouTubeUrl = MusicDnaAndExtras.IsYouTubeHostUrl(spotifyUrl);
+            if (isYouTubeUrl)
+            {
+                try
+                {
+                    statusText.Text = "Reading YouTube Music link…";
+                    var (name, owner, tracks) = await _extras.ImportYouTubeMusicUrlAsync(spotifyUrl, (msg, p) =>
+                    {
+                        Dispatcher.UIThread.Post(() => { statusText.Text = msg; progBar.Value = p; });
+                    });
+                    if (tracks.Count == 0) throw new InvalidOperationException("No playable tracks were found in that public link.");
+                    var pl = _store.CreatePlaylist(name, "", tracks);
+                    pl.OwnerName = owner;
+                    pl.Source = "YouTube Music";
+                    _store.SaveDebounced();
+                    ShowToast($"Imported from YouTube Music: {tracks.Count} track(s)");
+                    await NavigateToAsync("pl:" + pl.Id, () => { RenderLocalPlaylistDetail(pl); return Task.CompletedTask; });
+                }
+                catch (Exception ex) { statusText.Text = $"YouTube Music link error: {ex.Message}"; }
+                finally { openBtn.IsEnabled = true; progBar.IsVisible = false; progBar.IsIndeterminate = false; }
+                return;
+            }
             if (!isProfile)
             {
                 try
@@ -1082,7 +1123,7 @@ public partial class MainWindow
                     ShowToast($"Imported \"{pl.Name}\" ({tracks.Count} tracks)!");
                     await NavigateToAsync("pl:" + pl.Id, () => { RenderLocalPlaylistDetail(pl); return Task.CompletedTask; });
                 }
-                catch (Exception ex) { statusText.Text = $"Spotify link error: {ex.Message}"; }
+                catch (Exception ex) { statusText.Text = $"Import error: {ex.Message}"; }
                 finally { openBtn.IsEnabled = true; progBar.IsVisible = false; progBar.IsIndeterminate = false; }
                 return;
             }
@@ -1647,16 +1688,10 @@ public partial class MainWindow
         root.Children.Add(hero);
 
         var credits = new StackPanel { Spacing = 9 };
-        credits.Children.Add(new TextBlock
-        {
-            Text = "PC edition by V!SHNU",
-            FontSize = 15,
-            FontWeight = FontWeight.SemiBold,
-        });
         var lineageContent = new StackPanel { Spacing = 8 };
         lineageContent.Children.Add(new TextBlock
         {
-            Text = "Original Echo Music project: EchoMusicApp and its contributors. The project and this PC edition are distributed under GPL-3.0; full notices are in LICENSE.txt.",
+            Text = "Original project: EchoMusicApp and its contributors. This Windows edition is maintained by V!SHNU and remains based on that upstream GPL-3.0 project. Full copyright, license, and dependency notices are in LICENSE.txt.",
             FontSize = 11.5,
             Foreground = ResBrush("TextMutedBrush"),
             TextWrapping = TextWrapping.Wrap,
@@ -1678,7 +1713,7 @@ public partial class MainWindow
 
         root.Children.Add(new TextBlock
         {
-            Text = "Guest Mode works without signing in. Spotify playlist import accepts a public Spotify URL or a local CSV/M3U playlist file; this desktop edition does not ask for your Spotify password or use Spotify OAuth.",
+            Text = "Guest Mode is the default: browse and import supported public music links without an account. Your playlists, likes, and listening history are stored on this device.",
             FontSize = 12.5,
             Foreground = ResBrush("TextMutedBrush"),
             TextWrapping = TextWrapping.Wrap,
@@ -2172,7 +2207,7 @@ public partial class MainWindow
         updateButtons.Children.Add(getReleaseBtn);
         sysCard.Children.Add(updateButtons);
 
-        sysCard.Children.Add(new TextBlock { Text = "Auto reduces visual work whenever another app or a game is focused. Choose a mode in this row or right-click the leaf beside PiP; hidden and minimized windows always pause UI work.", FontSize = 12, Foreground = ResBrush("TextSecondaryBrush"), TextWrapping = TextWrapping.Wrap });
+        sysCard.Children.Add(new TextBlock { Text = "On is a low-power mode: it stops decorative animations and spectrum redraws, uses direct (non-animated) scrolling, caps UI refresh to 4 times per second, limits artwork decode size and stream prefetch, while audio continues. Auto applies these reductions when another app is focused or Echo Music is minimized.", FontSize = 12, Foreground = ResBrush("TextSecondaryBrush"), TextWrapping = TextWrapping.Wrap });
         sysCard.Children.Add(BuildChoiceRow("Resource Saver", new[]
         {
             ("Auto", "Auto (reduce work in background)"),
@@ -2252,7 +2287,7 @@ public partial class MainWindow
         sysCard.Children.Add(backupRow);
         sysCard.Children.Add(new TextBlock
         {
-            Text = $"Echo Music Native PC v{DynamicConfigService.CurrentAppVersion} · PC edition by V!SHNU · GPL-3.0  •  Data folder: {_store.DataDir}",
+            Text = $"Echo Music Native PC v{DynamicConfigService.CurrentAppVersion} · GPL-3.0  •  Data folder: {_store.DataDir}",
             FontSize = 11.5,
             Foreground = ResBrush("TextMutedBrush"),
         });

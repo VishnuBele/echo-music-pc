@@ -10,14 +10,14 @@ Download the current release from the [Echo Music releases page](https://github.
 
 ### Windows 10/11
 
-1. Download `EchoMusic-Setup-v2.0.3-x64.exe` from the release assets.
+1. Download `EchoMusic-Setup-v2.0.4-x64.exe` from the release assets.
 2. Open it and follow the setup screens. It installs for your Windows user and includes the .NET runtime; you do not need to install .NET separately or use an administrator account.
 
 The installer is **unsigned**. Windows SmartScreen or antivirus software may display a warning. Check that the file came from the official release and verify its SHA-256 before opening it. I never ask you to turn off antivirus protection.
 
 ### Linux (x86-64)
 
-1. Download and extract `EchoMusic-Linux-v2.0.3-x64.tar.gz`.
+1. Download and extract `EchoMusic-Linux-v2.0.4-x64.tar.gz`.
 2. Open a terminal in the extracted folder and run:
 
    ```sh
@@ -31,12 +31,12 @@ The installer adds a per-user copy and an application-menu shortcut. This compac
 
 - Search, browse recommendations, charts, albums, artists, playlists and related music.
 - Synced lyrics, lyric timing controls, translation options and a fullscreen player.
-- Guest Mode, local music, playlist management, public Spotify playlist import and offline downloads.
+- Guest Mode, local music, playlist management, public Spotify and YouTube Music imports, and offline downloads.
 - A 10-band equalizer, presets, playback speed, volume normalization, crossfade and other playback controls.
 - Themes, content filters, keyboard shortcuts, a mini-player, the Command Palette and Echo Wrapped.
 - Optional Discord Rich Presence and optional Google sign-in on Windows for YouTube Music features.
 
-Spotify playlist import uses a public playlist URL or a local playlist file; it does not ask for a Spotify password. Google sign-in is optional, is not an official Google OAuth integration, and does not provide access to a full YouTube Music library, listening history, Recaps or personalized Home feed. Linux stays in Guest Mode.
+Spotify import accepts public playlists, albums, tracks, and public profiles; YouTube Music import accepts public playlists and single song/video links. YouTube channel/profile browsing, private playlists, and YouTube auto-mix/radio links are not supported by the importer. Local CSV/M3U files also work. These import paths do not ask for Spotify credentials or OAuth. Google sign-in is optional, is not an official Google OAuth integration, and does not provide access to a full YouTube Music library, listening history, Recaps or personalized Home feed. Linux stays in Guest Mode.
 
 ## Keyboard shortcuts
 
@@ -60,9 +60,9 @@ Shortcuts that use a single letter are available when a text field is not focuse
 | `Alt` + `←` / `→` | Go back or forward in navigation history |
 | `Esc` | Close the topmost dialog or fullscreen player; clear search when applicable |
 
-## About this release — v2.0.3
+## About this release — v2.0.4
 
-This focused UI follow-up smooths the playlist header fade, shows a live spectrum in the playing track's Home/Search play badge, clarifies Resource Saver status on hover, and resumes visuals across stale desktop foreground transitions. Other screens and behaviors are left unchanged.
+This release virtualizes large playlist rows and Home shelf cards without removing any content, reduces background artwork and visual work in Resource Saver, uses right-sized thumbnails for cards and max-resolution art for Now Playing, and improves playlist editing and cover previews. Playback duration bounds and stream-recovery protections are retained. See `RELEASE-NOTES-v2.0.4.md` for validation limits.
 
 ## Privacy and local data
 

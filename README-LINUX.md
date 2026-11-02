@@ -1,12 +1,12 @@
-# Echo Music for Linux (x86-64)
+# Echo Music v2.0.4 for Linux (x86-64)
 
-The compact v2.0.3 Linux package is a framework-dependent native C#/Avalonia build and requires the **.NET 8 runtime** (`Microsoft.NETCore.App` 8.0) to be installed on the system. The installer checks for it and explains the requirement if it is missing. Graphics and audio libraries are also provided by your desktop/distribution. Audio is written to ALSA's default output; on common desktop systems that routes through PulseAudio or PipeWire. If startup reports that `libasound.so.2` is missing, install the ALSA runtime (`libasound2`/`libasound2t64` on Debian or Ubuntu, `alsa-lib` on Fedora or Arch).
+The compact v2.0.4 Linux package is a framework-dependent native C#/Avalonia build and requires the **.NET 8 runtime** (`Microsoft.NETCore.App` 8.0) to be installed on the system. The installer checks for it and explains the requirement if it is missing. Graphics and audio libraries are also provided by your desktop/distribution. Audio is written to ALSA's default output; on common desktop systems that routes through PulseAudio or PipeWire. If startup reports that `libasound.so.2` is missing, install the ALSA runtime (`libasound2`/`libasound2t64` on Debian or Ubuntu, `alsa-lib` on Fedora or Arch).
 
 To build a self-contained package that bundles .NET, set `SELF_CONTAINED=true` when running `installer/build-linux-package.sh`. The self-contained package is much larger.
 
 ## Install
 
-1. Download and extract `EchoMusic-Linux-v2.0.3-x64.tar.gz`.
+1. Download and extract `EchoMusic-Linux-v2.0.4-x64.tar.gz`.
 2. Open a terminal in the extracted folder and run:
 
    ```sh

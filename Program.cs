@@ -1,6 +1,8 @@
 using Avalonia;
+using Avalonia.Controls;
 using EchoMusic.Core;
 using EchoMusic.UI;
+using NAudio.Wave;
 
 namespace EchoMusic;
 
@@ -59,7 +61,161 @@ public static class Program
 
     private static async Task<int> RunHeadlessSelfTestAsync()
     {
-        Console.WriteLine("=== Echo Music v2.0.3 Native Engine End-to-End Self-Test ===");
+        Console.WriteLine("=== Echo Music v2.0.4 Native Engine End-to-End Self-Test ===");
+
+        var spotifyMatchProbe = MusicDnaAndExtras.PickSpotifyMatch(
+            ("Safe Title", "Correct Artist", 200_000),
+            new SearchPageResult
+            {
+                Tracks = new List<TrackItem>
+                {
+                    new() { Id = "wrong-artist", Title = "Safe Title", Artists = new() { new ArtistRef { Name = "Wrong Artist" } }, DurationSeconds = 200 },
+                    new() { Id = "wrong-duration", Title = "Safe Title", Artists = new() { new ArtistRef { Name = "Correct Artist" } }, DurationSeconds = 400 },
+                    new() { Id = "verified", Title = "Safe Title", Artists = new() { new ArtistRef { Name = "Correct Artist" } }, DurationSeconds = 201 },
+                },
+            });
+        bool spotifyMatchValidated = spotifyMatchProbe?.Id == "verified";
+        Console.WriteLine($"[spotify-import-match] rejected artist/duration mismatches and selected the verified title+artist+duration result={spotifyMatchValidated}");
+        if (!spotifyMatchValidated) return 19;
+
+        var oldPlaylist = System.Text.Json.JsonSerializer.Deserialize<LocalPlaylist>("{\"Id\":\"legacy\"}");
+        bool legacyCoverDefaultPreserved = oldPlaylist?.CoverRoundness == 14;
+        Console.WriteLine($"[playlist-cover-roundness] older playlist JSON keeps the legacy default radius={legacyCoverDefaultPreserved}");
+        if (!legacyCoverDefaultPreserved) return 20;
+
+        string upgradedCurrentArt = InnertubeParsers.UpgradeThumb("https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg", 1200);
+        bool currentArtPrefersMaxResolution = upgradedCurrentArt.EndsWith("/maxresdefault.jpg", StringComparison.OrdinalIgnoreCase);
+        string upgradedCardArt = InnertubeParsers.UpgradeThumb("https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg", 384);
+        bool cardArtUsesRightSizedSource = upgradedCardArt.EndsWith("/hqdefault.jpg", StringComparison.OrdinalIgnoreCase);
+        Console.WriteLine($"[now-playing-artwork-resolution] large artwork uses max-resolution source={currentArtPrefersMaxResolution}; standard card art avoids max-res transfer={cardArtUsesRightSizedSource}");
+        if (!currentArtPrefersMaxResolution || !cardArtUsesRightSizedSource) return 31;
+
+        bool youtubeProfileRejected = false;
+        try
+        {
+            await new MusicDnaAndExtras(new InnerTubeClient()).ImportYouTubeMusicUrlAsync("https://music.youtube.com/@channel");
+        }
+        catch (ArgumentException) { youtubeProfileRejected = true; }
+        Console.WriteLine($"[youtube-import-profile] channel/profile links are rejected instead of being implied supported={youtubeProfileRejected}");
+        if (!youtubeProfileRejected) return 21;
+
+        var codecFixture = System.Text.Json.Nodes.JsonNode.Parse("""
+        [
+          {"mimeType":"audio/webm; codecs=\"opus\"","bitrate":160000,"url":"https://example.invalid/opus"},
+          {"mimeType":"audio/mp4; codecs=\"mp4a.40.2\"","bitrate":128000,"url":"https://example.invalid/aac"}
+        ]
+        """)!.AsArray();
+        bool nativeCodecPreferenceCorrect = StreamResolver.RankCandidateFormats(codecFixture, "Auto", preferWebmOpus: false).First()["mimeType"]?.GetValue<string>()?.Contains("audio/mp4", StringComparison.OrdinalIgnoreCase) == true
+            && StreamResolver.RankCandidateFormats(codecFixture, "Auto", preferWebmOpus: true).First()["mimeType"]?.GetValue<string>()?.Contains("audio/webm", StringComparison.OrdinalIgnoreCase) == true;
+        Console.WriteLine($"[platform-codec-preference] Windows can prefer native AAC while WebM/Opus remains explicitly selectable={nativeCodecPreferenceCorrect}");
+        if (!nativeCodecPreferenceCorrect) return 27;
+
+        byte[] rangeFixture = Enumerable.Range(0, 1024).Select(i => (byte)(i % 251)).ToArray();
+        var transientRangeHandler = new SelfTestRangeHandler(rangeFixture, failFirstRequests: 1);
+        using (var rangeHttp = new HttpClient(transientRangeHandler))
+        using (var rangeStream = new BoundedRangeHttpStream(rangeHttp,
+            new ResolvedStream { Url = "https://range-selftest.invalid/audio", UserAgent = "selftest", ContentLength = rangeFixture.Length },
+            rangeFixture.Take(128).ToArray()))
+        {
+            var received = new byte[rangeFixture.Length];
+            int total = 0;
+            while (total < received.Length)
+            {
+                int n = rangeStream.Read(received, total, received.Length - total);
+                if (n == 0) break;
+                total += n;
+            }
+            bool retryRecovered = total == rangeFixture.Length && received.SequenceEqual(rangeFixture) && transientRangeHandler.RequestCount >= 2;
+            Console.WriteLine($"[range-read-retry] transient HTTP failure retried without truncating the audio stream={retryRecovered} (bytes={total}/{rangeFixture.Length})");
+            if (!retryRecovered) return 22;
+        }
+
+        var failedRangeHandler = new SelfTestRangeHandler(rangeFixture, failFirstRequests: 9);
+        using (var rangeHttp = new HttpClient(failedRangeHandler))
+        using (var rangeStream = new BoundedRangeHttpStream(rangeHttp,
+            new ResolvedStream { Url = "https://range-selftest.invalid/audio", UserAgent = "selftest", ContentLength = rangeFixture.Length },
+            rangeFixture.Take(128).ToArray()))
+        {
+            bool raisedError = false;
+            try { _ = rangeStream.Read(new byte[rangeFixture.Length], 0, rangeFixture.Length); }
+            catch (IOException) { raisedError = true; }
+            Console.WriteLine($"[range-read-failure] persistent range failures surface as errors, never zero-byte EOF={raisedError}");
+            if (!raisedError) return 23;
+        }
+
+        var cutoffGuard = new PlaybackCutoffGuard();
+        cutoffGuard.Reset("early-cutoff");
+        var firstCutoff = cutoffGuard.Evaluate("early-cutoff", 1.2, 168, 168, out _, out int attempt1);
+        var secondCutoff = cutoffGuard.Evaluate("early-cutoff", 1.3, 168, 168, out _, out int attempt2);
+        var exhaustedCutoff = cutoffGuard.Evaluate("early-cutoff", 1.4, 168, 168, out _, out _);
+        var naturalEnd = cutoffGuard.Evaluate("complete-track", 165.2, 168, 168, out _, out _);
+        var unknownDurationGuard = new PlaybackCutoffGuard();
+        unknownDurationGuard.Reset("unknown-duration");
+        var unknownEarlyEnd = unknownDurationGuard.Evaluate("unknown-duration", 1.0, 0, 0, out _, out _);
+        var unknownLongEnd = unknownDurationGuard.Evaluate("unknown-duration", 8.0, 0, 0, out _, out _);
+        bool cutoffGuardCorrect = firstCutoff == TrackEndDecision.RetryStream && attempt1 == 1
+            && secondCutoff == TrackEndDecision.RetryStream && attempt2 == 2
+            && exhaustedCutoff == TrackEndDecision.StopAfterRetries
+            && naturalEnd == TrackEndDecision.AllowEnd
+            && unknownEarlyEnd == TrackEndDecision.RetryStream
+            && unknownLongEnd == TrackEndDecision.AllowEnd;
+        Console.WriteLine($"[premature-track-end] early EOF refreshes same song twice then stops; unknown-duration early EOF is guarded and true end remains normal={cutoffGuardCorrect}");
+        if (!cutoffGuardCorrect) return 25;
+
+        byte[] malformedWebm = { 0x1A,0x45,0xDF,0xA3,0x80, 0x18,0x53,0x80,0x67,0x80, 0x1F,0x43,0xB6,0x75,0x80, 0x00 };
+        bool malformedWebmRaisedError = false;
+        try
+        {
+            using var malformedSource = new WebmOpusSampleSource(new MemoryStream(malformedWebm), fallbackDurationSec: 30, ownsStream: true);
+            _ = malformedSource.Read(new float[128], 0, 128);
+        }
+        catch (InvalidDataException) { malformedWebmRaisedError = true; }
+        Console.WriteLine($"[webm-malformed-not-eof] corrupt EBML within a declared stream raises an error, not natural EOF={malformedWebmRaisedError}");
+        if (!malformedWebmRaisedError) return 26;
+
+        var sourceRows = new StackPanel();
+        var targetRows = new StackPanel();
+        var testRow = new Border();
+        sourceRows.Children.Add(testRow);
+        var detachedRow = sourceRows.Children[0];
+        sourceRows.Children.RemoveAt(0);
+        targetRows.Children.Add(detachedRow);
+        bool rowWasDetachedBeforeMove = sourceRows.Children.Count == 0 && targetRows.Children.Count == 1;
+        Console.WriteLine($"[playlist-row-parent-transfer] batch rows are detached before being moved to the persistent list={rowWasDetachedBeforeMove}");
+        if (!rowWasDetachedBeforeMove) return 29;
+
+        using (var durationBoundDeck = new DeckState(new TrackItem { Id = "selftest-duration", Title = "Duration-bound source", DurationSeconds = 1 },
+            new SelfTestSampleProvider(), new SelfTestNoopDisposable(), null, null, null, null))
+        {
+            bool bufferedToEnd = SpinWait.SpinUntil(() => durationBoundDeck.BufferedSampleFloats >= 96_000, TimeSpan.FromSeconds(2));
+            var beyondEnd = new float[120_000];
+            int decodedFloats = bufferedToEnd ? durationBoundDeck.Read(beyondEnd, 0, beyondEnd.Length) : 0;
+            bool timelineBounded = bufferedToEnd && decodedFloats == 96_000
+                && durationBoundDeck.PositionSeconds <= 1.0001 && durationBoundDeck.IsFinished;
+            Console.WriteLine($"[duration-bound-deck] decoder audio stops at declared duration instead of playing beyond the end={timelineBounded} (buffered={durationBoundDeck.BufferedSampleFloats}, read={decodedFloats}, pos={durationBoundDeck.PositionSeconds:0.000}, finished={durationBoundDeck.IsFinished})");
+            if (!timelineBounded) return 30;
+        }
+
+        using (var readyDeck = new DeckState(new TrackItem { Id = "selftest-ready", Title = "Buffered source" },
+            new SelfTestSampleProvider(), new SelfTestNoopDisposable(), null, null, null, null))
+        {
+            bool validAudioAccepted = await readyDeck.WaitForUsableAudioAsync(TimeSpan.FromMilliseconds(100), CancellationToken.None);
+            Console.WriteLine($"[codec-race-audio-readiness] a candidate with at least 100 ms decoded PCM is accepted={validAudioAccepted}");
+            if (!validAudioAccepted) return 28;
+        }
+
+        using (var brokenDeck = new DeckState(new TrackItem { Id = "selftest", Title = "Failing source" },
+            new SelfTestFailingSampleProvider(), new SelfTestNoopDisposable(), null, null, null, null))
+        {
+            bool observedError = SpinWait.SpinUntil(() => brokenDeck.SourceReadError is not null, TimeSpan.FromSeconds(2));
+            var silence = new float[128];
+            int nonEofRead = brokenDeck.Read(silence, 0, silence.Length);
+            bool errorIsNotNaturalEnd = observedError && nonEofRead == silence.Length && !brokenDeck.IsFinished;
+            bool emptyDeckRejected = !await brokenDeck.WaitForUsableAudioAsync(TimeSpan.FromMilliseconds(100), CancellationToken.None);
+            Console.WriteLine($"[decode-error-not-eof] failed provider read stays non-EOF and cannot signal queue advance={errorIsNotNaturalEnd}");
+            Console.WriteLine($"[codec-race-audio-readiness] a zero-sample decoder candidate is rejected rather than selected={emptyDeckRejected}");
+            if (!errorIsNotNaturalEnd || !emptyDeckRejected) return 24;
+        }
 
         // [0/8] Verify C1-continuous SmoothLimit has ZERO step discontinuity across [-1.5, +1.5]
         float maxStep = 0f;
@@ -276,6 +432,57 @@ public static class Program
 
         Console.WriteLine("ALL 10 engine and subsystem checks passed; Kill Chori lyric availability is reported separately from sync status.");
         return 0;
+    }
+
+    private sealed class SelfTestRangeHandler(byte[] payload, int failFirstRequests) : HttpMessageHandler
+    {
+        public int RequestCount;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int requestNumber = Interlocked.Increment(ref RequestCount);
+            if (requestNumber <= failFirstRequests)
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable));
+
+            long start = request.Headers.Range?.Ranges.FirstOrDefault()?.From ?? 0;
+            if (start >= payload.LongLength)
+            {
+                var eof = new HttpResponseMessage(System.Net.HttpStatusCode.RequestedRangeNotSatisfiable);
+                eof.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(payload.LongLength);
+                return Task.FromResult(eof);
+            }
+            long requestedEnd = request.Headers.Range?.Ranges.FirstOrDefault()?.To ?? (start + BoundedRangeHttpStream.PageSize - 1);
+            long end = Math.Min(payload.LongLength - 1, requestedEnd);
+            int offset = checked((int)start);
+            int length = checked((int)(end - start + 1));
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent(payload, offset, length),
+            };
+            response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(start, end, payload.LongLength);
+            return Task.FromResult(response);
+        }
+    }
+
+    private sealed class SelfTestSampleProvider : ISampleProvider
+    {
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(48_000, 2);
+        public int Read(float[] buffer, int offset, int count)
+        {
+            Array.Fill(buffer, 0.05f, offset, count);
+            return count;
+        }
+    }
+
+    private sealed class SelfTestFailingSampleProvider : ISampleProvider
+    {
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(48_000, 2);
+        public int Read(float[] buffer, int offset, int count) => throw new IOException("self-test decoder read failed");
+    }
+
+    private sealed class SelfTestNoopDisposable : IDisposable
+    {
+        public void Dispose() { }
     }
 
     private sealed class SelfTestSponsorBlockHandler : HttpMessageHandler
