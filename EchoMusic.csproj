@@ -11,11 +11,13 @@
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <ApplicationIcon>Assets\echo.ico</ApplicationIcon>
     <AssemblyName>EchoMusic</AssemblyName>
-    <Version>2.0.4</Version>
+    <Version>2.0.5</Version>
     <Product>Echo Music</Product>
     <Company>V!SHNU</Company>
     <Copyright>Copyright (C) 2026 Echo Music (GPL-3.0)</Copyright>
     <Description>Native PC Edition of Echo Music - Ad-free streaming, SMTC, Discord RPC, SponsorBlock, synced lyrics, Music DNA, Music Flow, 10-band EQ, WSOLA pitch-lock, and offline playback.</Description>
+    <DefineConstants Condition="'$(UpdatePopupPreview)' == 'true'">$(DefineConstants);UPDATE_POPUP_PREVIEW</DefineConstants>
+    <DefineConstants Condition="'$(DirectRunTest)' == 'true'">$(DefineConstants);DIRECT_RUN_TEST</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

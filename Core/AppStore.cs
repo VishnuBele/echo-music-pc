@@ -104,6 +104,7 @@ public sealed class AppStore
     {
         string? legacyCookieHeader = null;
         string? legacyDataSyncId = null;
+        bool migratedCrossfadeDefault = false;
         try
         {
             if (File.Exists(DbPath))
@@ -138,6 +139,13 @@ public sealed class AppStore
             _db = new PersistentDatabase();
         }
         _db.ContentExclusions ??= new List<ContentExclusion>();
+        if (!_db.Settings.CrossfadeDefaultMigrationDone)
+        {
+            if (_db.Settings.CrossfadeSeconds <= 0) _db.Settings.CrossfadeSeconds = 5;
+            _db.Settings.CrossfadeDefaultMigrationDone = true;
+            migratedCrossfadeDefault = true;
+        }
+        _db.Settings.CrossfadeSeconds = Math.Clamp(_db.Settings.CrossfadeSeconds, 0, 12);
         // Windows media-session integration stays enabled; expose no user-facing toggle for this required default.
         _db.Settings.SmtcEnabled = true;
         if (_db.Settings.PlayerStyle == "LiquidGlass") _db.Settings.PlayerStyle = "Circle";
@@ -180,7 +188,7 @@ public sealed class AppStore
         }
 
         // Re-serialize once to remove any legacy plaintext cookie fields from old settings files.
-        if (legacyCookieHeader is not null || migratedLegacySession)
+        if (legacyCookieHeader is not null || migratedLegacySession || migratedCrossfadeDefault)
             SaveNow();
     }
 

@@ -436,24 +436,33 @@ public sealed class InnerTubeClient
             }
         }
 
-        // Enrich default PC Home with Charts & New Release Albums if still under 9 shelves (matches OG Echo YouTube.explore + HomeViewModel)
-        if (string.IsNullOrEmpty(moodParams) && result.Shelves.Count < 9)
+        // Match Android HomeViewModel.loadNetworkDataPhase(): fetch Home and Explore-backed
+        // Charts/New Releases on every Home load. Do not skip fresh sections just because the
+        // initial Home response happened to contain nine or more shelves.
+        if (string.IsNullOrEmpty(moodParams))
         {
             try
             {
                 var chartsTask = GetTopChartShelvesAsync(ct);
                 var newRelTask = PostAsync("browse", new JsonObject { ["browseId"] = "FEmusic_new_releases_albums" }, ct: ct);
                 await Task.WhenAll(chartsTask, newRelTask);
-                foreach (var s in chartsTask.Result.Take(3))
+                void ReplaceOrAppendFreshShelf(ShelfSection fresh)
                 {
-                    if (!string.IsNullOrWhiteSpace(s.Title) && seenTitles.Add(s.Title))
-                        result.Shelves.Add(s);
+                    if (string.IsNullOrWhiteSpace(fresh.Title) || (fresh.Tracks.Count == 0 && fresh.Cards.Count == 0)) return;
+                    int existingIndex = result.Shelves.FindIndex(s =>
+                        s.Title.Equals(fresh.Title, StringComparison.OrdinalIgnoreCase));
+                    if (existingIndex >= 0)
+                        result.Shelves[existingIndex] = fresh;
+                    else
+                        result.Shelves.Add(fresh);
                 }
+
+                foreach (var s in chartsTask.Result.Take(3))
+                    ReplaceOrAppendFreshShelf(s);
                 foreach (var s in InnertubeParsers.ParseShelves(newRelTask.Result).Take(2))
                 {
                     if (string.IsNullOrWhiteSpace(s.Title)) s.Title = "New Release Albums";
-                    if (seenTitles.Add(s.Title))
-                        result.Shelves.Add(s);
+                    ReplaceOrAppendFreshShelf(s);
                 }
             }
             catch { /* non-fatal enrichment */ }

@@ -311,9 +311,12 @@ public sealed class AppSettings
     public string AudioQuality { get; set; } = "Best"; // DataSaver | Normal | High | Best
     public double Volume { get; set; } = 0.85;
     public bool NormalizeVolume { get; set; } = true;
-    public int CrossfadeSeconds { get; set; } = 0;
+    public int CrossfadeSeconds { get; set; } = 5;
+    public bool CrossfadeDefaultMigrationDone { get; set; }
     public bool GaplessPreload { get; set; } = true;
     public bool AutoplayEchoBrain { get; set; } = true;
+    public string IdlePlayBehavior { get; set; } = "DoNothing"; // DoNothing | ResumeLast
+    public bool SkipFailedTracksAfterTwoErrors { get; set; } = true;
     public bool RunOnStartup { get; set; } = false;
     public bool PauseOnMute { get; set; } = true;
     public bool HideVideoSongs { get; set; } = false;

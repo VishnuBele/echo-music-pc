@@ -2,8 +2,9 @@
 ; Echo Music - Native Windows x64 Setup Installer (NSIS Modern UI 2)
 ; Compiles on Windows or Linux via `makensis` using solid LZMA compression.
 ; Installs per-user (like Spotify / VS Code) with zero UAC elevation required,
-; zero external runtimes (.NET 8 & Skia GPU bundled), Start Menu + Desktop
-; shortcuts, and full Windows "Installed Apps" uninstaller registration.
+; Start Menu + Desktop shortcuts, and Windows "Installed Apps" uninstaller
+; registration. The bundled app is self-contained; Microsoft Edge WebView2 Runtime
+; remains a target-PC prerequisite for embedded web content.
 ; =============================================================================
 
 Unicode true
@@ -14,7 +15,7 @@ SetCompressorDictSize 16
 
 !define APP_NAME "Echo Music"
 !define APP_EXE "EchoMusic.exe"
-!define APP_VERSION "2.0.4"
+!define APP_VERSION "2.0.5"
 !define APP_PUBLISHER "V!SHNU"
 !define APP_URL "https://github.com/VishnuBele/echo-music-pc"
 !define SOURCE_DIR "${__FILEDIR__}/.."
@@ -24,7 +25,7 @@ SetCompressorDictSize 16
   !define PUBLISH_DIR "${SOURCE_DIR}/publish-win-x64"
 !endif
 !ifndef OUT_FILE
-  !define OUT_FILE "${SOURCE_DIR}/../EchoMusic-Setup-v2.0.4-x64.exe"
+  !define OUT_FILE "${SOURCE_DIR}/../EchoMusic-Setup-v2.0.5-x64.exe"
 !endif
 !ifndef PAYLOAD_INCLUDE
   !error "PAYLOAD_INCLUDE must point to the generated per-file progress include"
@@ -56,7 +57,7 @@ BrandingText "${APP_NAME} v${APP_VERSION} - Native PC Edition"
 
 ; Pages
 !define MUI_WELCOMEPAGE_TITLE "Welcome to Echo Music for PC"
-!define MUI_WELCOMEPAGE_TEXT "This wizard will install Echo Music v${APP_VERSION} (Native 64-bit Windows Edition) on your computer.$\r$\n$\r$\nFeatures included out of the box:$\r$\n  • Ad-free high-bitrate Opus streaming & Echo Brain$\r$\n  • Real-time Synced Karaoke Lyrics + Translation$\r$\n  • Music Flow, Music DNA, Spotify Import & Wrapped$\r$\n  • 10-Band Equalizer, Slowed+Reverb DSP & Offline Mode$\r$\n$\r$\nNo Java, FFmpeg, or extra runtimes needed. Click Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This wizard will install Echo Music v${APP_VERSION} (Native 64-bit Windows Edition) on your computer.$\r$\n$\r$\nFeatures include ad-free Opus streaming, Echo Brain, synced lyrics, Music Flow, Music DNA, Spotify Import, a 10-band equalizer, and offline mode.$\r$\n$\r$\nThe Echo Music app and .NET runtime are bundled. Microsoft Edge WebView2 Runtime is required for embedded web content and is commonly available on current Windows PCs. Click Next to continue."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${SOURCE_DIR}/LICENSE.txt"
 !insertmacro MUI_PAGE_DIRECTORY
@@ -72,7 +73,7 @@ BrandingText "${APP_NAME} v${APP_VERSION} - Native PC Edition"
 !insertmacro MUI_LANGUAGE "English"
 
 ; PE Version Info
-VIProductVersion "2.0.4.0"
+VIProductVersion "2.0.5.0"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "CompanyName" "${APP_PUBLISHER}"
 VIAddVersionKey /LANG=${LANG_ENGLISH} "FileDescription" "${APP_NAME} Windows x64 Setup"

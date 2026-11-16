@@ -5,7 +5,7 @@ using System.Text.RegularExpressions;
 
 namespace EchoMusic.Core;
 
-public sealed record AppReleaseInfo(string Tag, Version? ParsedVersion, string ReleaseUrl, string? InstallerUrl, string? Notes);
+public sealed record AppReleaseInfo(string Tag, Version? ParsedVersion, string ReleaseUrl, string? InstallerUrl, string? Notes, DateTimeOffset? PublishedAt = null);
 
 /// <summary>Checks GitHub Releases for the PC edition. It never downloads or installs silently.</summary>
 public static class AppUpdateService
@@ -79,7 +79,8 @@ public static class AppUpdateService
                     .Select(x => x.Url)
                     .FirstOrDefault();
             }
-            return (new AppReleaseInfo(tag, ParseVersion(tag), releaseUrl, installer, root["body"]?.GetValue<string>()), null);
+            DateTimeOffset? publishedAt = DateTimeOffset.TryParse(root["published_at"]?.GetValue<string>(), out var parsedDate) ? parsedDate : null;
+            return (new AppReleaseInfo(tag, ParseVersion(tag), releaseUrl, installer, root["body"]?.GetValue<string>(), publishedAt), null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -98,10 +99,10 @@ public static class AppUpdateService
             throw new HttpRequestException($"release page returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
 
         string finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? baseUrl + "/releases/latest";
+        string html = await response.Content.ReadAsStringAsync(ct);
         string tag = ExtractTag(finalUrl);
         if (string.IsNullOrWhiteSpace(tag))
         {
-            string html = await response.Content.ReadAsStringAsync(ct);
             var title = Regex.Match(html, @"<title>\s*Release\s+([^<·]+)", RegexOptions.IgnoreCase);
             if (title.Success) tag = WebUtility.HtmlDecode(title.Groups[1].Value).Trim();
         }
@@ -125,7 +126,10 @@ public static class AppUpdateService
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch { /* The release page remains useful even if its optional asset fragment is unavailable. */ }
 
-        return new AppReleaseInfo(tag, ParseVersion(tag), releaseUrl, installer, null);
+        var dateMatch = Regex.Match(html, @"<meta[^>]+(?:property|name)=[""'](?:article:published_time|og:updated_time)[""'][^>]*content=[""']([^""']+)[""']|<meta[^>]+content=[""']([^""']+)[""'][^>]+(?:property|name)=[""'](?:article:published_time|og:updated_time)[""']", RegexOptions.IgnoreCase);
+        string dateText = dateMatch.Groups[1].Success ? dateMatch.Groups[1].Value : dateMatch.Groups[2].Value;
+        DateTimeOffset? publishedAt = DateTimeOffset.TryParse(WebUtility.HtmlDecode(dateText), out var parsedPublished) ? parsedPublished : null;
+        return new AppReleaseInfo(tag, ParseVersion(tag), releaseUrl, installer, null, publishedAt);
     }
 
     private static string ExtractTag(string releaseUrl)

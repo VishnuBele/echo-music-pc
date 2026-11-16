@@ -132,6 +132,7 @@ public partial class MainWindow : Window
 
     // Home & Charts state
     private HomeFeedResult? _cachedHome;
+    private TrackItem? _homeSuggestedTrack;
     private List<ShelfSection>? _homeMoodGenresCache;
     private string? _activeMoodParams;
     private string? _activeMoodBrowseId;
@@ -141,6 +142,7 @@ public partial class MainWindow : Window
     private bool _loadingMoreHome;
     private readonly HashSet<string> _homeSeenTitles = new(StringComparer.OrdinalIgnoreCase);
     private int _heroCarouselIndex;
+    private int _homeShuffleSeed = Random.Shared.Next();
     private DispatcherTimer? _heroAutoTimer;
     private int _chartPageIndex;
     private int _homeLoadGeneration;
@@ -409,6 +411,18 @@ public partial class MainWindow : Window
 
     private async Task CheckForStartupUpdateAsync()
     {
+#if UPDATE_POPUP_PREVIEW
+        await Task.Delay(1200); // Let the first screen settle before the local preview.
+        var preview = new AppReleaseInfo(
+            "v2.0.5",
+            new Version(2, 0, 5),
+            "https://github.com/VishnuBele/echo-music-pc/releases/latest",
+            null,
+            "# Echo Music PC v2.0.5\n\n**Home and playback refresh**\n\n- Home refresh rotates the Suggested for You pick.\n- The refreshed pick stays idle until the listener explicitly presses Play.\n- Refreshing Home invalidates pending old radio results and replaces the generated next-song tail.\n\n*Preview only — no update will be downloaded or installed.*",
+            new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero));
+        Dispatcher.UIThread.Post(() => ShowStartupUpdateModal(preview, previewOnly: true));
+        return;
+#else
         try
         {
             await Task.Delay(1200); // Let the first screen settle before any update prompt.
@@ -425,49 +439,116 @@ public partial class MainWindow : Window
         {
             // Startup update checks are intentionally silent when offline or when the release service is unavailable.
         }
+#endif
     }
 
-    private void ShowStartupUpdateModal(AppReleaseInfo release)
+    private Control BuildReleaseMarkdown(string markdown)
+    {
+        var panel = new StackPanel { Spacing = 5, Margin = new Thickness(0, 2, 0, 4) };
+        foreach (var raw in markdown.Replace("\r\n", "\n").Split('\n'))
+        {
+            var line = raw.TrimEnd();
+            if (string.IsNullOrWhiteSpace(line)) { panel.Children.Add(new Border { Height = 3 }); continue; }
+            int heading = 0;
+            while (heading < line.Length && heading < 6 && line[heading] == '#') heading++;
+            string content = heading > 0 && heading < line.Length && line[heading] == ' ' ? line[(heading + 1)..] : line;
+            bool bullet = Regex.IsMatch(content, @"^\s*[-*+]\s+");
+            bool numbered = Regex.IsMatch(content, @"^\s*\d+[.)]\s+");
+            bool quote = content.StartsWith("> ", StringComparison.Ordinal);
+            if (bullet) content = Regex.Replace(content, @"^\s*[-*+]\s+", "");
+            else if (numbered) content = Regex.Replace(content, @"^\s*\d+[.)]\s+", "");
+            else if (quote) content = content[2..];
+            var text = new TextBlock
+            {
+                FontSize = heading > 0 ? Math.Max(12, 18 - heading) : 12,
+                FontWeight = heading > 0 ? FontWeight.Bold : FontWeight.Normal,
+                Foreground = quote ? ResBrush("TextSecondaryBrush") : ResBrush("TextMutedBrush"),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(bullet || numbered ? 9 : quote ? 8 : 0, 0, 0, 0),
+            };
+            if (bullet) text.Inlines?.Add(new Run("•  "));
+            else if (numbered) text.Inlines?.Add(new Run("◦  "));
+            AddMarkdownInlines(text, content);
+            panel.Children.Add(text);
+        }
+        return panel;
+    }
+
+    private static void AddMarkdownInlines(TextBlock block, string text)
+    {
+        var inlines = block.Inlines;
+        if (inlines is null) return;
+        var token = new Regex(@"(\*\*.+?\*\*|__.+?__|\*[^*]+?\*|_[^_]+?_|`[^`]+`|\[([^\]]+)\]\(([^)]+)\))");
+        int position = 0;
+        foreach (Match match in token.Matches(text))
+        {
+            if (match.Index > position) inlines.Add(new Run(text[position..match.Index]));
+            string value = match.Value;
+            if (value.StartsWith("**") || value.StartsWith("__"))
+                inlines.Add(new Run(value[2..^2]) { FontWeight = FontWeight.Bold });
+            else if (value.StartsWith("*") || value.StartsWith("_"))
+                inlines.Add(new Run(value[1..^1]) { FontStyle = FontStyle.Italic });
+            else if (value.StartsWith('`'))
+                inlines.Add(new Run(value[1..^1]) { FontFamily = new FontFamily("Consolas, monospace") });
+            else
+                inlines.Add(new Run(match.Groups[2].Value) { TextDecorations = TextDecorations.Underline, Foreground = Brushes.LightSkyBlue });
+            position = match.Index + match.Length;
+        }
+        if (position < text.Length) inlines.Add(new Run(text[position..]));
+    }
+
+    private void ShowStartupUpdateModal(AppReleaseInfo release, bool previewOnly = false)
     {
         var stack = new StackPanel { Spacing = 14, MaxWidth = 520 };
         stack.Children.Add(new TextBlock
         {
-            Text = $"Echo Music {release.Tag} is available",
+            Text = previewOnly ? "Update popup preview" : $"Echo Music {release.Tag} is available",
             FontSize = 20,
             FontWeight = FontWeight.Bold,
             TextWrapping = TextWrapping.Wrap,
         });
         stack.Children.Add(new TextBlock
         {
-            Text = $"You are using v{DynamicConfigService.CurrentAppVersion}. Open the release page to review the changes and download the update. Nothing will be downloaded or installed automatically.",
+            Text = previewOnly
+                ? "This is a local preview of the formatted changelog and publication date. No update will be downloaded or installed."
+                : $"You are using v{DynamicConfigService.CurrentAppVersion}. Open the release page to review the changes and download the update. Nothing will be downloaded or installed automatically.",
             FontSize = 13,
             Foreground = ResBrush("TextSecondaryBrush"),
             TextWrapping = TextWrapping.Wrap,
         });
         if (!string.IsNullOrWhiteSpace(release.Notes))
         {
-            var notes = new TextBlock
+            stack.Children.Add(new TextBlock
             {
-                Text = release.Notes.Trim(),
-                FontSize = 12,
-                Foreground = ResBrush("TextMutedBrush"),
-                TextWrapping = TextWrapping.Wrap,
-            };
-            stack.Children.Add(new ScrollViewer { Content = notes, MaxHeight = 150, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+                Text = release.PublishedAt is { } published ? $"Published {published.ToLocalTime():d MMM yyyy}" : "Release notes",
+                FontSize = 11,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = ResBrush("TextSecondaryBrush"),
+            });
+            stack.Children.Add(new ScrollViewer { Content = BuildReleaseMarkdown(release.Notes.Trim()), MaxHeight = 190, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         }
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 8 };
-        var later = new Button { Classes = { "pill" }, Content = "Later" };
-        later.Click += (_, _) => ModalBackdrop.IsVisible = false;
-        var open = new Button { Classes = { "accentBtn" }, Content = "View release" };
-        open.Click += (_, _) =>
+        if (previewOnly)
         {
-            ModalBackdrop.IsVisible = false;
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(release.ReleaseUrl) { UseShellExecute = true }); }
-            catch (Exception ex) { ShowToast($"Could not open the update link: {ex.Message}"); }
-        };
-        actions.Children.Add(later);
-        actions.Children.Add(open);
+            var closePreview = new Button { Classes = { "accentBtn" }, Content = "Close preview" };
+            closePreview.Click += (_, _) => ModalBackdrop.IsVisible = false;
+            actions.Children.Add(closePreview);
+        }
+        else
+        {
+            var later = new Button { Classes = { "pill" }, Content = "Later" };
+            later.Click += (_, _) => ModalBackdrop.IsVisible = false;
+            var open = new Button { Classes = { "accentBtn" }, Content = "View release" };
+            open.Click += (_, _) =>
+            {
+                ModalBackdrop.IsVisible = false;
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(release.ReleaseUrl) { UseShellExecute = true }); }
+                catch (Exception ex) { ShowToast($"Could not open the update link: {ex.Message}"); }
+            };
+            actions.Children.Add(later);
+            actions.Children.Add(open);
+        }
         stack.Children.Add(actions);
         ModalCardHost.Child = stack;
         ModalBackdrop.IsVisible = true;
@@ -1868,29 +1949,41 @@ public partial class MainWindow : Window
             RenderRightDock();
     }
 
-    internal async Task HandlePlayPauseActionAsync()
+    internal Task HandlePlayPauseActionAsync()
     {
         if (_audio.CurrentTrack is not null)
         {
             _audio.TogglePlayPause();
-            return;
+            return Task.CompletedTask;
         }
 
-        var seeds = _cachedHome?.Shelves.SelectMany(s => s.Tracks).Take(20).ToList();
-        if (seeds is null || seeds.Count == 0)
-            seeds = _store.LikedSongs.Take(20).ToList();
-        if (seeds.Count == 0)
+        if (string.Equals(_store.Settings.IdlePlayBehavior, "ResumeLast", StringComparison.OrdinalIgnoreCase))
         {
-            ShowToast("Loading top songs to start playback...");
-            try
+            var last = _store.History.FirstOrDefault(h => h.EntryKind == "track"
+                && (!string.IsNullOrWhiteSpace(h.VideoId)
+                    || (!string.IsNullOrWhiteSpace(h.LocalFilePath) && File.Exists(h.LocalFilePath))));
+            if (last is not null)
             {
-                var sr = await _yt.SearchAsync("top hits", "songs");
-                seeds = sr.Tracks.Take(20).ToList();
+                var track = new TrackItem
+                {
+                    Id = !string.IsNullOrWhiteSpace(last.VideoId) ? last.VideoId : $"local:{Path.GetFileNameWithoutExtension(last.LocalFilePath)}",
+                    Title = last.Title,
+                    Artists = last.Artists.Select(a => new ArtistRef { Name = a.Name, Id = a.Id }).ToList(),
+                    Album = last.Album is null ? null : new AlbumRef { Name = last.Album.Name, Id = last.Album.Id },
+                    Thumbnail = last.Thumbnail,
+                    DurationSeconds = last.DurationSeconds,
+                    LocalFilePath = last.LocalFilePath,
+                };
+                return _audio.PlayQueueAsync(new[] { track }, 0, autoRadioIfSingle: false);
             }
-            catch { }
+            ShowToast("There’s no previously played song to resume yet. Choose a song from Home, Search, or your Library.");
+            return Task.CompletedTask;
         }
-        if (seeds.Count > 0)
-            await _audio.PlayQueueAsync(seeds, 0, autoRadioIfSingle: true);
+
+        // Default: an idle Play click is not permission to start a recommendation,
+        // liked-song list, or stale queue. Keep suggestions visible until the user chooses.
+        ShowToast("Choose a song from Home, Search, or your Library to start playback.");
+        return Task.CompletedTask;
     }
 
     // --------------------------------------------------------- Navigation Engine
@@ -2857,7 +2950,7 @@ public partial class MainWindow : Window
             var stack = new StackPanel { Spacing = 14, Margin = new Thickness(0, 2, 2, 16) };
             _dockNowStack = stack;
 
-            var tr = _audio.CurrentTrack ?? _cachedHome?.Shelves.SelectMany(s => s.Tracks).FirstOrDefault();
+            var tr = _audio.CurrentTrack ?? _homeSuggestedTrack;
             if (tr is null)
             {
                 var emptyCard = new Border
@@ -2876,6 +2969,8 @@ public partial class MainWindow : Window
             else
             {
                 bool isLiveCurrent = _audio.CurrentTrack is not null;
+                // Capture the displayed recommendation for both the image and explicit Play action.
+                TrackItem? idleSuggestionSnapshot = isLiveCurrent ? null : tr.Clone();
                 stack.Children.Add(new TextBlock
                 {
                     Text = isLiveCurrent ? (tr.Album?.Name ?? "Now Playing") : "Suggested for You",
@@ -2919,13 +3014,14 @@ public partial class MainWindow : Window
                     CornerRadius = new CornerRadius(10),
                     ClipToBounds = true,
                     Background = ResBrush("BgCardBrush"),
-                    Cursor = new Cursor(StandardCursorType.Hand),
+                    Cursor = new Cursor(isLiveCurrent ? StandardCursorType.Hand : StandardCursorType.Arrow),
                     Child = artGrid,
                 };
                 artCard.PointerPressed += async (_, _) =>
                 {
-                    if (!isLiveCurrent) await _audio.PlayQueueAsync(new List<TrackItem> { tr }, 0, autoRadioIfSingle: true);
-                    else ToggleFullscreenOverlay(true);
+                    if (isLiveCurrent) ToggleFullscreenOverlay(true);
+                    else if (idleSuggestionSnapshot is { } suggested)
+                        await _audio.PlayQueueAsync(new List<TrackItem> { suggested.Clone() }, 0, autoRadioIfSingle: true);
                 };
                 stack.Children.Add(artCard);
 
@@ -2961,8 +3057,15 @@ public partial class MainWindow : Window
                 }
                 else
                 {
+                    // This is an explicitly displayed recommendation, so its own Play button
+                    // should play this exact track; the transport Play button remains governed
+                    // by the separate idle-play preference.
                     quickPlayOrLike.Content = "Play";
-                    quickPlayOrLike.Click += async (_, _) => await _audio.PlayQueueAsync(new List<TrackItem> { tr }, 0, autoRadioIfSingle: true);
+                    quickPlayOrLike.Click += async (_, _) =>
+                    {
+                        if (idleSuggestionSnapshot is { } suggested)
+                            await _audio.PlayQueueAsync(new List<TrackItem> { suggested.Clone() }, 0, autoRadioIfSingle: true);
+                    };
                 }
                 Grid.SetColumn(quickPlayOrLike, 1);
                 metaRow.Children.Add(quickPlayOrLike);
@@ -3478,7 +3581,10 @@ public partial class MainWindow : Window
 
     private async Task<List<ShelfSection>> GetHomeMoodGenresQuietlyAsync()
     {
-        if (_homeMoodGenresCache is { Count: > 0 }) return _homeMoodGenresCache;
+        // Android fetches YouTube.explore() again whenever Home is loaded/refreshed. Keep the
+        // previous result only as an offline fallback; do not return it instead of querying.
+        var cachedFallback = _homeMoodGenresCache;
+        bool receivedFreshResponse = false;
         var best = new List<ShelfSection>();
         for (int attempt = 0; attempt < 2; attempt++)
         {
@@ -3493,6 +3599,7 @@ public partial class MainWindow : Window
                 if (attempt > 0 && !string.IsNullOrWhiteSpace(_store.Settings.CookieHeader))
                     client.SetCookies(_store.Settings.CookieHeader, _store.Settings.DataSyncId);
                 var shelves = await client.GetMoodAndGenresAsync(cts.Token);
+                receivedFreshResponse = true;
                 if (shelves.Count > best.Count) best = shelves;
                 if (shelves.Count >= 2)
                 {
@@ -3503,8 +3610,12 @@ public partial class MainWindow : Window
             catch { }
             if (attempt == 0) await Task.Delay(700);
         }
-        if (best.Count > 0) _homeMoodGenresCache = best;
-        return best;
+        if (best.Count > 0)
+        {
+            _homeMoodGenresCache = best;
+            return best;
+        }
+        return receivedFreshResponse ? best : cachedFallback ?? best;
     }
 
     private static List<ShelfSection> EnsureHomeGenreShelf(List<ShelfSection> shelves, ShelfSection? fallback)
@@ -3540,8 +3651,38 @@ public partial class MainWindow : Window
         catch { }
     }
 
-    internal async Task LoadHomeViewAsync(string? moodParams, string? moodBrowseId = null)
+    private TrackItem? ChooseHomeSuggestedTrack(HomeFeedResult feed)
     {
+        var candidates = feed.Shelves.SelectMany(s => s.Tracks)
+            // The right-panel one-tap suggestion must be an audio track, not a video-only/low-confidence
+            // feed result that may fail both audio decoders. The user's Hide Video Songs toggle still
+            // controls whether video items appear in the main Home shelves.
+            .Where(t => !string.IsNullOrWhiteSpace(t.Id) && !t.IsLocal && !t.IsVideo
+                && !_store.IsTrackExcluded(t))
+            .DistinctBy(t => t.Id)
+            .ToList();
+        if (candidates.Count > 1 && _homeSuggestedTrack is { } previous)
+            candidates.RemoveAll(t => t.Id == previous.Id);
+        return candidates.Count == 0 ? null : candidates[Random.Shared.Next(candidates.Count)];
+    }
+
+    private static List<T> ShuffleHomeItems<T>(IEnumerable<T> source, int seed)
+    {
+        var items = source.ToList();
+        var random = new Random(seed);
+        for (int i = items.Count - 1; i > 0; i--)
+        {
+            int j = random.Next(i + 1);
+            (items[i], items[j]) = (items[j], items[i]);
+        }
+        return items;
+    }
+
+    internal async Task LoadHomeViewAsync(string? moodParams, string? moodBrowseId = null, bool forceFreshSuggestion = false)
+    {
+        // Android changes its random seed on pull-to-refresh; mirror that so spotlight and
+        // quick-access picks visibly reshuffle even when YouTube returns identical shelves.
+        _homeShuffleSeed = Random.Shared.Next();
         int loadGeneration = ++_homeLoadGeneration;
         bool IsCurrentHomeRender() => loadGeneration == _homeLoadGeneration && _activeNavKey == "home";
         _heroAutoTimer?.Stop();
@@ -3585,8 +3726,23 @@ public partial class MainWindow : Window
                 catch { }
             }
 
-            if (_dockOpen && _dockTab == "now" && _audio.CurrentTrack is null)
-                RenderRightDock();
+            // Keep the idle right-panel suggestion stable across navigation and Home/mood section
+            // changes. Only an explicit Home refresh rotates it; ordinary rerenders must never
+            // resurrect a stale/random suggestion from a prior section.
+            if (_homeSuggestedTrack is null || forceFreshSuggestion)
+                _homeSuggestedTrack = ChooseHomeSuggestedTrack(feed) ?? _homeSuggestedTrack;
+            if (_audio.CurrentTrack is null)
+            {
+                // Refresh the idle queue, but never start playback just because Home loaded.
+                // The suggested card remains the explicit Play action.
+                if (forceFreshSuggestion) _audio.ClearIdleQueue();
+            }
+            else
+            {
+                _ = _audio.RefreshAutoRadioQueueAsync();
+            }
+
+            if (_dockOpen && _dockTab == "now") RenderRightDock();
 
             var root = new StackPanel { Spacing = 22 };
 
@@ -3642,16 +3798,45 @@ public partial class MainWindow : Window
             chipScroll.Content = chipRow;
             root.Children.Add(chipScroll);
 
-            root.Children.Add(new TextBlock
+            var homeGreetingRow = new Grid { ColumnDefinitions = ColumnDefinitions.Parse("*,Auto") };
+            homeGreetingRow.Children.Add(new TextBlock
             {
                 Text = GetTimeGreeting(),
                 FontSize = 26,
                 FontWeight = FontWeight.ExtraBold,
                 Margin = new Thickness(0, -4, 0, -4),
+                VerticalAlignment = VerticalAlignment.Center,
             });
+            var refreshHomeButton = new Button
+            {
+                Classes = { "pill" },
+                Padding = new Thickness(11, 7),
+                VerticalAlignment = VerticalAlignment.Center,
+                Content = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 6,
+                    Children =
+                    {
+                        new PathIcon { Data = Icons.Refresh, Width = 15, Height = 15, Foreground = ResBrush("TextSecondaryBrush") },
+                        new TextBlock { Text = "Refresh", FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center },
+                    },
+                },
+            };
+            ToolTip.SetTip(refreshHomeButton, "Fetch fresh Home and Explore recommendations");
+            refreshHomeButton.Click += async (_, _) =>
+            {
+                refreshHomeButton.IsEnabled = false;
+                try { await LoadHomeViewAsync(moodParams, moodBrowseId, forceFreshSuggestion: true); }
+                finally { refreshHomeButton.IsEnabled = true; }
+            };
+            Grid.SetColumn(refreshHomeButton, 1);
+            homeGreetingRow.Children.Add(refreshHomeButton);
+            root.Children.Add(homeGreetingRow);
 
             // 2. Wide Featured Spotlight Carousel, mirroring the mobile Home hero above the shelves
-            var heroCandidates = feed.Shelves.SelectMany(s => s.Tracks).Where(t => !string.IsNullOrEmpty(t.Thumbnail)).DistinctBy(t => t.Id).Take(12).ToList();
+            var homeTracks = feed.Shelves.SelectMany(s => s.Tracks).DistinctBy(t => t.Id).ToList();
+            var heroCandidates = ShuffleHomeItems(homeTracks.Where(t => !string.IsNullOrEmpty(t.Thumbnail)), _homeShuffleSeed).Take(12).ToList();
             if (heroCandidates.Count > 0)
             {
                 _heroAutoTimer?.Stop();
@@ -3698,7 +3883,7 @@ public partial class MainWindow : Window
 
 
             // 3. Signature Official Spotify Desktop 2-Column Compact Quick-Access Tiles (up to 8 tiles = 2×4 grid!)
-            var quickPool = feed.Shelves.SelectMany(s => s.Tracks).DistinctBy(t => t.Id).Take(8).ToList();
+            var quickPool = ShuffleHomeItems(homeTracks, unchecked(_homeShuffleSeed + 7919)).Take(8).ToList();
             if (quickPool.Count > 0)
             {
                 var quickGrid = new UniformGrid { Columns = 2 };

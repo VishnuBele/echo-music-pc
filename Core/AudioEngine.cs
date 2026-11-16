@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using NAudio.Dsp;
@@ -1308,6 +1309,7 @@ public sealed class AudioEngine : IDisposable
     private readonly SemaphoreSlim _nextAdvanceGate = new(1, 1);
     private string? _lightPrewarmNextId;
     private bool _crossfadeTriggeredForTrack;
+    private int _autoRadioRefreshCount;
     private DeckState? _historyDeck;
     private PlayHistoryEntry? _historyEntry;
     private long _historyLastPersistedMs;
@@ -1329,6 +1331,14 @@ public sealed class AudioEngine : IDisposable
     private bool _sleepEndOfTrack;
 
     public List<TrackItem> Queue { get; } = new();
+    private readonly List<TrackItem> _autoRadioTracks = new();
+    private readonly object _recentRadioLock = new();
+    private readonly ConcurrentDictionary<string, byte> _forceBestQualityTracks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _bestQualityNoticePending = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _failedTracksWaitingForRadio = new(StringComparer.Ordinal);
+    private readonly Queue<string> _recentRadioOrder = new();
+    private readonly HashSet<string> _recentRadioIds = new(StringComparer.Ordinal);
+    private int _queueGeneration;
     public PlaybackCollectionContext? QueueSource { get; private set; }
     public int CurrentIndex { get; private set; } = -1;
     public TrackItem? CurrentTrack => CurrentIndex >= 0 && CurrentIndex < Queue.Count ? Queue[CurrentIndex] : null;
@@ -1356,6 +1366,7 @@ public sealed class AudioEngine : IDisposable
     public event Action? StateChanged;
     public event Action<TrackItem?>? TrackChanged;
     public event Action<string>? ToastRequested;
+    internal void LogUiPlaybackAction(string message) => WritePlaybackDiagnostic(message);
 
     public AudioEngine(InnerTubeClient yt, StreamResolver resolver, AppStore store)
     {
@@ -1721,7 +1732,8 @@ public sealed class AudioEngine : IDisposable
         }
 
         // Crossfade trigger
-        if (xfadeSec > 0 && !_crossfadeTriggeredForTrack && rem <= xfadeSec && rem > 0.4 && Repeat != RepeatMode.One)
+        if (xfadeSec > 0 && Volatile.Read(ref _autoRadioRefreshCount) == 0
+            && !_crossfadeTriggeredForTrack && rem <= xfadeSec && rem > 0.4 && Repeat != RepeatMode.One)
         {
             var nextIdx = PeekNextIndex();
             if (nextIdx >= 0 && nextIdx < Queue.Count)
@@ -1749,8 +1761,12 @@ public sealed class AudioEngine : IDisposable
     {
         var list = tracks.Select(t => t.Clone()).ToList();
         if (list.Count == 0) return;
+        WritePlaybackDiagnostic($"PLAY_QUEUE startId={list[Math.Clamp(startIndex, 0, list.Count - 1)].Id} startTitle={list[Math.Clamp(startIndex, 0, list.Count - 1)].Title} count={list.Count} autoRadio={autoRadioIfSingle}");
 
         // Save the outgoing session before changing the collection metadata.
+        Interlocked.Increment(ref _queueGeneration);
+        _autoRadioTracks.Clear();
+        _failedTracksWaitingForRadio.Clear();
         RecordCurrentHistoryIfAny();
         QueueSource = collectionContext;
         _playlistHistoryRecordedForQueue = false;
@@ -1775,20 +1791,133 @@ public sealed class AudioEngine : IDisposable
         if (autoRadioIfSingle && Queue.Count == 1 && !Queue[0].IsLocal && _store.Settings.AutoplayEchoBrain)
         {
             var seed = Queue[0];
+            int generation = Volatile.Read(ref _queueGeneration);
             _ = Task.Run(async () =>
             {
                 try
                 {
                     var radio = await _yt.GetRadioQueueAsync(seed.Id, seed.PlaylistId);
-                    var filtered = radio.Where(r => r.Id != seed.Id && (!_store.Settings.HideVideoSongs || !r.IsVideo) && !_store.IsTrackExcluded(r)).Take(25).ToList();
-                    if (filtered.Count > 0 && CurrentTrack?.Id == seed.Id && Queue.Count == 1)
+                    var excluded = BuildRecentRadioExclusions(seed.Id);
+                    var filtered = radio.Where(r => !excluded.Contains(r.Id)
+                        && (!_store.Settings.HideVideoSongs || !r.IsVideo) && !_store.IsTrackExcluded(r))
+                        .DistinctBy(r => r.Id).Take(25).ToList();
+                    if (filtered.Count > 0 && generation == Volatile.Read(ref _queueGeneration) && CurrentTrack?.Id == seed.Id && Queue.Count == 1)
                     {
                         Queue.AddRange(filtered);
+                        _autoRadioTracks.AddRange(filtered);
+                        RememberAutoRadioTracks(filtered);
                         StateChanged?.Invoke();
+                        // A single-track Play (including the sidebar recommendation) can fail
+                        // before its radio tail arrives. If that failure met the two-error rule,
+                        // continue with the first generated next song once it is available.
+                        if (_failedTracksWaitingForRadio.TryRemove(seed.Id, out _)
+                            && CurrentTrack?.Id == seed.Id && _mixer.PrimaryDeck is null && !IsLoading)
+                        {
+                            CurrentIndex++;
+                            WritePlaybackDiagnostic($"AUTO_SKIP_FAILED_TRACK id={seed.Id} reason=radio-tail-arrived nextId={Queue[CurrentIndex].Id}");
+                            await LoadCurrentTrackAsync();
+                        }
                     }
                 }
                 catch { /* non-fatal */ }
             });
+        }
+    }
+
+    private HashSet<string> BuildRecentRadioExclusions(string seedId)
+    {
+        var excluded = new HashSet<string>(StringComparer.Ordinal) { seedId };
+        lock (_recentRadioLock) excluded.UnionWith(_recentRadioIds);
+        // Keep the last played sequence from being reintroduced after an app restart too.
+        foreach (var entry in _store.History.Take(60))
+            if (entry.EntryKind == "track" && entry.MsPlayed >= 4000 && !string.IsNullOrWhiteSpace(entry.VideoId))
+                excluded.Add(entry.VideoId);
+        return excluded;
+    }
+
+    private void RememberAutoRadioTracks(IEnumerable<TrackItem> tracks)
+    {
+        lock (_recentRadioLock)
+        {
+            foreach (var track in tracks)
+            {
+                if (string.IsNullOrWhiteSpace(track.Id) || !_recentRadioIds.Add(track.Id)) continue;
+                _recentRadioOrder.Enqueue(track.Id);
+            }
+            while (_recentRadioOrder.Count > 120)
+                _recentRadioIds.Remove(_recentRadioOrder.Dequeue());
+        }
+    }
+
+    /// <summary>Discard stale queued recommendations while playback is idle, without starting a track.</summary>
+    public void ClearIdleQueue()
+    {
+        if (CurrentTrack is not null || IsLoading || IsPlaying) return;
+        Interlocked.Increment(ref _queueGeneration);
+        _autoRadioTracks.Clear();
+        Queue.Clear();
+        CurrentIndex = -1;
+        QueueSource = null;
+        _playlistHistoryRecordedForQueue = false;
+        _prewarmedNextId = null;
+        _prewarmedNextTask = null;
+        _lightPrewarmNextId = null;
+        _crossfadeTriggeredForTrack = false;
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>Replace the app-generated radio tail after Home refresh, while preserving the current song and manual queue entries.</summary>
+    public async Task RefreshAutoRadioQueueAsync()
+    {
+        if (!_store.Settings.AutoplayEchoBrain || CurrentTrack is not { IsLocal: false } seed)
+            return;
+
+        // A first radio request may still be in flight, before _autoRadioTracks is populated.
+        // Invalidate it now so its old results cannot append after Home has refreshed.
+        bool hasGeneratedTail = _autoRadioTracks.Count > 0;
+        bool noUpcomingItems = CurrentIndex >= 0 && Queue.Count <= CurrentIndex + 1;
+        if (!hasGeneratedTail && !noUpcomingItems) return; // leave a manual queue untouched
+
+        int generation = Interlocked.Increment(ref _queueGeneration);
+        Interlocked.Increment(ref _autoRadioRefreshCount);
+        var previous = _autoRadioTracks.ToArray();
+        try
+        {
+            var results = await _yt.GetRadioQueueAsync(seed.Id, seed.PlaylistId).ConfigureAwait(false);
+            if (generation != Volatile.Read(ref _queueGeneration) || CurrentTrack?.Id != seed.Id || !_store.Settings.AutoplayEchoBrain)
+                return;
+
+            var excluded = BuildRecentRadioExclusions(seed.Id);
+            foreach (var old in previous) excluded.Add(old.Id);
+            var fresh = results
+                .Where(t => !excluded.Contains(t.Id) && !_store.IsTrackExcluded(t)
+                    && (!_store.Settings.HideVideoSongs || !t.IsVideo)
+                    && Queue.All(q => q.Id != t.Id))
+                .DistinctBy(t => t.Id)
+                .Take(25)
+                .ToList();
+
+            foreach (var item in previous)
+            {
+                if (CurrentIndex + 1 >= Queue.Count) break;
+                int idx = Queue.FindIndex(CurrentIndex + 1, t => ReferenceEquals(t, item));
+                if (idx >= 0) Queue.RemoveAt(idx);
+            }
+            // Fresh results deliberately exclude the old generated tail. If the service
+            // repeats only stale IDs, clear that tail instead of replaying it again.
+            fresh = fresh.Where(t => Queue.All(q => q.Id != t.Id)).ToList();
+            _autoRadioTracks.Clear();
+            Queue.AddRange(fresh);
+            _autoRadioTracks.AddRange(fresh);
+            RememberAutoRadioTracks(fresh);
+            StateChanged?.Invoke();
+        }
+        catch { /* keep the current queue if refresh is offline */ }
+        finally
+        {
+            if (Interlocked.Decrement(ref _autoRadioRefreshCount) == 0
+                && CurrentTrack?.Id == seed.Id && !_mixer.IsPaused && !IsLoading)
+                _crossfadeTriggeredForTrack = false; // re-evaluate the refreshed next item on the next playback tick
         }
     }
 
@@ -1813,6 +1942,7 @@ public sealed class AudioEngine : IDisposable
 
     public void PlayNextInQueue(TrackItem track)
     {
+        Interlocked.Increment(ref _queueGeneration);
         var copy = track.Clone();
         if (Queue.Count == 0)
         {
@@ -1828,6 +1958,7 @@ public sealed class AudioEngine : IDisposable
 
     public void AddToQueue(TrackItem track)
     {
+        Interlocked.Increment(ref _queueGeneration);
         var copy = track.Clone();
         if (Queue.Count == 0)
         {
@@ -1841,8 +1972,10 @@ public sealed class AudioEngine : IDisposable
 
     public void RemoveFromQueueAt(int index)
     {
+        Interlocked.Increment(ref _queueGeneration);
         if (index < 0 || index >= Queue.Count) return;
         bool removingCurrent = index == CurrentIndex;
+        _autoRadioTracks.Remove(Queue[index]);
         Queue.RemoveAt(index);
         if (Queue.Count == 0)
         {
@@ -1864,7 +1997,9 @@ public sealed class AudioEngine : IDisposable
 
     public void MoveInQueue(int fromIdx, int toIdx)
     {
+        Interlocked.Increment(ref _queueGeneration);
         if (fromIdx < 0 || fromIdx >= Queue.Count || toIdx < 0 || toIdx >= Queue.Count || fromIdx == toIdx) return;
+        _autoRadioTracks.Clear();
         var cur = CurrentTrack;
         var item = Queue[fromIdx];
         Queue.RemoveAt(fromIdx);
@@ -1876,14 +2011,17 @@ public sealed class AudioEngine : IDisposable
 
     public void ClearUpcomingQueue()
     {
+        Interlocked.Increment(ref _queueGeneration);
         if (CurrentIndex < 0 || Queue.Count <= CurrentIndex + 1) return;
         Queue.RemoveRange(CurrentIndex + 1, Queue.Count - (CurrentIndex + 1));
+        _autoRadioTracks.Clear();
         _prewarmedNextId = null;
         StateChanged?.Invoke();
     }
 
     public async Task JumpToQueueIndexAsync(int index)
     {
+        Interlocked.Increment(ref _queueGeneration);
         if (index < 0 || index >= Queue.Count) return;
         RecordCurrentHistoryIfAny();
         CurrentIndex = index;
@@ -2085,11 +2223,18 @@ public sealed class AudioEngine : IDisposable
             {
                 try
                 {
+                    int generation = Volatile.Read(ref _queueGeneration);
                     var more = await _yt.GetRadioQueueAsync(seed.Id);
-                    var fresh = more.Where(m => Queue.All(q => q.Id != m.Id) && !_store.IsTrackExcluded(m) && (!_store.Settings.HideVideoSongs || !m.IsVideo)).Take(18).ToList();
+                    if (generation != Volatile.Read(ref _queueGeneration) || CurrentTrack?.Id != seed.Id) return;
+                    var excluded = BuildRecentRadioExclusions(seed.Id);
+                    var fresh = more.Where(m => !excluded.Contains(m.Id) && Queue.All(q => q.Id != m.Id)
+                        && !_store.IsTrackExcluded(m) && (!_store.Settings.HideVideoSongs || !m.IsVideo))
+                        .DistinctBy(m => m.Id).Take(18).ToList();
                     if (fresh.Count > 0)
                     {
                         Queue.AddRange(fresh);
+                        _autoRadioTracks.AddRange(fresh);
+                        RememberAutoRadioTracks(fresh);
                         CurrentIndex++;
                         await LoadCurrentTrackAsync();
                         return;
@@ -2191,7 +2336,14 @@ public sealed class AudioEngine : IDisposable
             LastError = null;
         }
         FlushQueuedOutputDeferred();
-        ToastRequested?.Invoke($"The stream ended early; refreshing it and retrying this track ({retryAttempt}/2).");
+        bool switchedToBestForTrack = retryAttempt == 1
+            && endedDeck.StreamInfo is not null
+            && _store.Settings.AudioQuality != "Best"
+            && _forceBestQualityTracks.TryAdd(endedDeck.Track.Id, 0);
+        if (switchedToBestForTrack)
+            _bestQualityNoticePending.TryAdd(endedDeck.Track.Id, 0);
+        else
+            ToastRequested?.Invoke($"The stream ended early; refreshing it and retrying this track ({retryAttempt}/2).");
         // A fresh resolver pass avoids reusing an expired/partial cached media URL. Keep the retry
         // count across these internal reloads and resume near the last audible position.
         await LoadCurrentTrackAsync(
@@ -2204,6 +2356,7 @@ public sealed class AudioEngine : IDisposable
     private async Task PerformCrossfadeAdvanceAsync(int nextIdx, int xfadeSec)
     {
         int generation = Volatile.Read(ref _trackLoadGeneration);
+        int queueGeneration = Volatile.Read(ref _queueGeneration);
         string? outgoingTrackId = CurrentTrack?.Id;
         try
         {
@@ -2220,6 +2373,9 @@ public sealed class AudioEngine : IDisposable
             lock (_loadStateLock)
             {
                 stale = generation != _trackLoadGeneration
+                    || queueGeneration != Volatile.Read(ref _queueGeneration)
+                    || nextIdx < 0 || nextIdx >= Queue.Count
+                    || Queue[nextIdx].Id != nextTrack.Id
                     || IsLoading
                     || _mixer.IsPaused
                     || CurrentTrack?.Id != outgoingTrackId;
@@ -2242,6 +2398,8 @@ public sealed class AudioEngine : IDisposable
             if (stale)
             {
                 nextDeck.Dispose();
+                if (CurrentTrack?.Id == outgoingTrackId && !_mixer.IsPaused && !IsLoading)
+                    _crossfadeTriggeredForTrack = false; // a queue refresh may have replaced this transition target
                 return;
             }
 
@@ -2289,7 +2447,7 @@ public sealed class AudioEngine : IDisposable
         var track = CurrentTrack;
         if (track is null) return;
         bool preferWebmOpus = preferWebmOpusOverride ?? !OperatingSystem.IsWindows();
-        WritePlaybackDiagnostic($"LOAD id={track.Id} trackDuration={track.DurationSeconds}s forceRefresh={forceStreamRefresh} recovery={preserveCutoffRetries} codecPreference={(preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation")}");
+        WritePlaybackDiagnostic($"LOAD id={track.Id} title={track.Title} trackDuration={track.DurationSeconds}s forceRefresh={forceStreamRefresh} recovery={preserveCutoffRetries} codecPreference={(preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation")}");
         if (!preserveCutoffRetries)
         {
             _playbackCutoffGuard.Reset(track.Id);
@@ -2403,15 +2561,60 @@ public sealed class AudioEngine : IDisposable
                 if (current)
                 {
                     IsLoading = false;
-                    LastError = ex.Message;
+                    LastError = IsAudioDecodeFailure(ex)
+                        ? $"Couldn’t play “{track.Title}” even at Best available. Try another song; details are in PlaybackDiagnostics.log."
+                        : ex.Message;
                 }
             }
             if (current)
             {
-                ToastRequested?.Invoke($"Playback error: {ex.Message}");
+                int errorCount = CountLeafPlaybackErrors(ex);
+                int nextIndex = CurrentIndex + 1 < Queue.Count
+                    ? CurrentIndex + 1
+                    : Repeat == RepeatMode.All && Queue.Count > 1 ? 0 : -1;
+                if (_store.Settings.SkipFailedTracksAfterTwoErrors && errorCount >= 2 && nextIndex >= 0)
+                {
+                    WritePlaybackDiagnostic($"AUTO_SKIP_FAILED_TRACK id={track.Id} title={track.Title} errors={errorCount} nextId={Queue[nextIndex].Id}");
+                    ToastRequested?.Invoke($"Skipping “{track.Title}” after {errorCount} playback errors.");
+                    CurrentIndex = nextIndex;
+                    await LoadCurrentTrackAsync();
+                    return;
+                }
+                if (_store.Settings.SkipFailedTracksAfterTwoErrors && errorCount >= 2
+                    && Queue.Count == 1 && _store.Settings.AutoplayEchoBrain && CurrentTrack?.Id == track.Id)
+                {
+                    _failedTracksWaitingForRadio.TryAdd(track.Id, 0);
+                    WritePlaybackDiagnostic($"AUTO_SKIP_FAILED_TRACK id={track.Id} title={track.Title} errors={errorCount} reason=waiting-for-radio-tail");
+                    ToastRequested?.Invoke($"“{track.Title}” failed after {errorCount} playback errors; skipping it when the next recommendation arrives.");
+                    StateChanged?.Invoke();
+                    return;
+                }
+
+                ToastRequested?.Invoke(IsAudioDecodeFailure(ex)
+                    ? $"Couldn’t play “{track.Title}” even at Best available. Try another song; details are in PlaybackDiagnostics.log."
+                    : $"Playback error: {ex.Message}");
                 StateChanged?.Invoke();
             }
         }
+    }
+
+    private static int CountLeafPlaybackErrors(Exception ex)
+    {
+        if (ex is AggregateException aggregate)
+            return Math.Max(1, aggregate.InnerExceptions.Sum(CountLeafPlaybackErrors));
+        if (ex.InnerException is not null)
+            return CountLeafPlaybackErrors(ex.InnerException);
+        return 1;
+    }
+
+    private static bool IsAudioDecodeFailure(Exception ex)
+    {
+        string details = ex.ToString();
+        if (details.Contains("temporarily blocked anonymous playback", StringComparison.OrdinalIgnoreCase))
+            return false; // surface the actual service-access reason instead of a misleading codec-quality toast
+        return details.Contains("usable decoded audio", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("decode failed", StringComparison.OrdinalIgnoreCase)
+            || details.Contains("returned no usable PCM", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task<DeckState?> BuildDeckAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh = false, bool? preferWebmOpusOverride = null)
@@ -2438,17 +2641,56 @@ public sealed class AudioEngine : IDisposable
         }
 
         bool preferWebmOpus = preferWebmOpusOverride ?? !OperatingSystem.IsWindows();
-        if (OperatingSystem.IsWindows())
-            return await BuildWindowsCodecRaceAsync(track, ct, forceStreamRefresh, preferWebmOpus);
-        return await BuildOnlineDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus);
+        string requestedQuality = _forceBestQualityTracks.ContainsKey(track.Id)
+            ? "Best"
+            : _store.Settings.AudioQuality;
+        try
+        {
+            var deck = await BuildOnlineDeckAtQualityAsync(track, ct, forceStreamRefresh, preferWebmOpus, requestedQuality);
+            if (requestedQuality == "Best" && _bestQualityNoticePending.TryRemove(track.Id, out _))
+                ToastRequested?.Invoke($"Recovered “{track.Title}” at Best quality for this song only; your setting is unchanged.");
+            return deck;
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested && requestedQuality != "Best")
+        {
+            // A server-side anonymous-playback block is not a quality/codec problem. Repeating
+            // the same two codec requests at Best only doubles the wait and cannot unblock it.
+            if (ex.ToString().Contains("temporarily blocked anonymous playback", StringComparison.OrdinalIgnoreCase))
+            {
+                WritePlaybackDiagnostic($"QUALITY_FALLBACK_SKIPPED id={track.Id} reason=anonymous-playback-blocked; quality retry cannot resolve an access block");
+                throw new InvalidOperationException("YouTube temporarily blocked anonymous playback for this track. Try again later or on another network; changing audio quality will not help.", ex);
+            }
+            WritePlaybackDiagnostic($"QUALITY_FALLBACK id={track.Id} from={requestedQuality} to=Best error={ex.GetType().Name}:{ex.Message}");
+            try
+            {
+                var bestDeck = await BuildOnlineDeckAtQualityAsync(track, ct, forceStreamRefresh: true, preferWebmOpus, "Best");
+                _forceBestQualityTracks.TryAdd(track.Id, 0);
+                ToastRequested?.Invoke($"Using Best quality for “{track.Title}” only; your setting is unchanged.");
+                return bestDeck;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception bestError)
+            {
+                _forceBestQualityTracks.TryAdd(track.Id, 0); // do not repeat the slow low-quality attempt for this track this session
+                WritePlaybackDiagnostic($"QUALITY_FALLBACK_FAILED id={track.Id} selected={requestedQuality} selectedError={ex.GetType().Name}:{ex.Message} bestError={bestError.GetType().Name}:{bestError.Message}");
+                throw new InvalidOperationException($"Couldn’t play “{track.Title}” at the selected or Best quality. Try another song; details are in PlaybackDiagnostics.log.", new AggregateException(ex, bestError));
+            }
+        }
     }
 
-    private async Task<DeckState?> BuildWindowsCodecRaceAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus)
+    private Task<DeckState?> BuildOnlineDeckAtQualityAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus, string quality)
+    {
+        if (OperatingSystem.IsWindows())
+            return BuildWindowsCodecRaceAsync(track, ct, forceStreamRefresh, preferWebmOpus, quality);
+        return BuildOnlineDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus, quality);
+    }
+
+    private async Task<DeckState?> BuildWindowsCodecRaceAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus, string quality)
     {
         using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         WritePlaybackDiagnostic($"CODEC_RACE start id={track.Id} first={(preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation")} second={(preferWebmOpus ? "AAC/MediaFoundation" : "WebM/Opus")}");
-        var first = BuildReadyCodecCandidateAsync(track, preferWebmOpus, forceStreamRefresh, raceCts.Token);
-        var second = BuildReadyCodecCandidateAsync(track, !preferWebmOpus, forceStreamRefresh, raceCts.Token);
+        var first = BuildReadyCodecCandidateAsync(track, preferWebmOpus, forceStreamRefresh, raceCts.Token, quality);
+        var second = BuildReadyCodecCandidateAsync(track, !preferWebmOpus, forceStreamRefresh, raceCts.Token, quality);
         var pending = new List<Task<DeckState?>> { first, second };
         var failures = new List<Exception>();
 
@@ -2480,26 +2722,33 @@ public sealed class AudioEngine : IDisposable
 
         ct.ThrowIfCancellationRequested();
         if (failures.Count > 0)
-            throw new AggregateException("Neither AAC/MP4 nor WebM/Opus produced usable decoded audio.", failures);
-        throw new InvalidDataException("Neither AAC/MP4 nor WebM/Opus produced usable decoded audio.");
+        {
+            string details = string.Join(" || ", failures.Select(e => e.Message));
+            throw new InvalidDataException($"Neither AAC/MP4 nor WebM/Opus produced usable decoded audio. {details}", new AggregateException(failures));
+        }
+        throw new InvalidDataException("Neither AAC/MP4 nor WebM/Opus produced usable decoded audio: both decoders returned no usable PCM.");
     }
 
-    private async Task<DeckState?> BuildReadyCodecCandidateAsync(TrackItem track, bool preferWebmOpus, bool forceStreamRefresh, CancellationToken ct)
+    private async Task<DeckState?> BuildReadyCodecCandidateAsync(TrackItem track, bool preferWebmOpus, bool forceStreamRefresh, CancellationToken ct, string quality)
     {
-        DeckState? deck = await BuildOnlineDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus);
+        DeckState? deck = await BuildOnlineDeckAsync(track, ct, forceStreamRefresh, preferWebmOpus, quality);
         if (deck is null) return null;
         try
         {
-            if (await deck.WaitForUsableAudioAsync(TimeSpan.FromSeconds(2), ct))
+            if (await deck.WaitForUsableAudioAsync(TimeSpan.FromSeconds(3), ct))
                 return deck;
+            var sourceError = deck.SourceReadError;
+            int bufferedFloats = deck.BufferedSampleFloats;
+            string reason = sourceError is null ? (deck.IsFinished ? "decoder reached EOF before 100 ms of PCM" : "3-second decoder warm-up timed out")
+                : $"source read failed ({sourceError.GetType().Name}: {sourceError.Message})";
+            WritePlaybackDiagnostic($"DECK_NOT_READY id={track.Id} title={track.Title} quality={quality} codec={(preferWebmOpus ? "WebM/Opus" : "AAC/MediaFoundation")} mime={deck.StreamInfo?.MimeType ?? "unknown"} bufferedFloats={bufferedFloats} reason={reason}");
+            throw new InvalidDataException($"{(preferWebmOpus ? "WebM/Opus" : "AAC/MP4")} decode failed for '{track.Title}': {reason}; buffered {bufferedFloats} PCM samples.", sourceError);
         }
         catch
         {
             deck.Dispose();
             throw;
         }
-        deck.Dispose();
-        return null;
     }
 
     private static async Task DisposeCandidateWhenFinishedAsync(Task<DeckState?> candidate)
@@ -2508,11 +2757,14 @@ public sealed class AudioEngine : IDisposable
         catch { /* Failed/cancelled loser candidates have no deck to dispose. */ }
     }
 
-    private async Task<DeckState?> BuildOnlineDeckAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus)
+    private async Task<DeckState?> BuildOnlineDeckAsync(TrackItem track, CancellationToken ct, bool forceStreamRefresh, bool preferWebmOpus, string quality)
     {
         // Online YouTube Music stream: resolve and byte-verify via the configured client fallback chain.
-        var verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: preferWebmOpus, forceRefresh: forceStreamRefresh, ct);
+        var verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: preferWebmOpus, forceRefresh: forceStreamRefresh, ct, qualityOverride: quality, requirePreferredCodec: true);
         var resolved = verified.Stream;
+        WritePlaybackDiagnostic($"RESOLVED trackId={track.Id} trackTitle={track.Title} streamId={resolved.VideoId} streamTitle={resolved.Title} codec={resolved.Codec} bitrate={resolved.Bitrate} mime={resolved.MimeType} client={resolved.ClientName}");
+        if (!string.Equals(resolved.VideoId, track.Id, StringComparison.Ordinal))
+            throw new InvalidDataException($"Stream ID mismatch: selected '{track.Title}' ({track.Id}) but resolver returned {resolved.VideoId}.");
         var httpStream = new BoundedRangeHttpStream(_yt.SharedHttp, resolved, verified.InitialPage0);
 
         if (resolved.MimeType.Contains("webm", StringComparison.OrdinalIgnoreCase))
@@ -2526,7 +2778,7 @@ public sealed class AudioEngine : IDisposable
             {
                 httpStream.Dispose();
                 // Automatic Windows MediaFoundation AAC (itag 140) fallback if WebM header was unusual
-                var mp4Verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: false, forceRefresh: true, ct);
+                var mp4Verified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: false, forceRefresh: true, ct, qualityOverride: quality, requirePreferredCodec: true);
                 if (!mp4Verified.Stream.MimeType.Contains("mp4", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("The WebM/Opus stream could not be opened and no AAC/MP4 fallback is available.");
                 var mp4Stream = new BoundedRangeHttpStream(_yt.SharedHttp, mp4Verified.Stream, mp4Verified.InitialPage0);
@@ -2554,7 +2806,7 @@ public sealed class AudioEngine : IDisposable
             catch when (!preferWebmOpus)
             {
                 httpStream.Dispose();
-                var opusVerified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: true, forceRefresh: true, ct);
+                var opusVerified = await _resolver.ResolveVerifiedAsync(track.Id, preferWebmOpus: true, forceRefresh: true, ct, qualityOverride: quality, requirePreferredCodec: true);
                 if (!opusVerified.Stream.MimeType.Contains("webm", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("Media Foundation could not open AAC and no WebM/Opus fallback is available.");
                 var opusStream = new BoundedRangeHttpStream(_yt.SharedHttp, opusVerified.Stream, opusVerified.InitialPage0);

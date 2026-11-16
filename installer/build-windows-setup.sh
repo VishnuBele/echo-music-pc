@@ -6,8 +6,8 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_ROOT="${BUILD_ROOT:-${TMPDIR:-/tmp}/echomusic-build}"
 PUBLISH_DIR="${PUBLISH_DIR:-$BUILD_ROOT/publish-win-x64}"
 SETUP_UI_DIR="$BUILD_ROOT/publish-custom-setup"
-CORE_SETUP="$BUILD_ROOT/EchoMusic-CoreSetup-v2.0.4.exe"
-OUT_EXE="${OUT_EXE:-$HOME/EchoMusic-Setup-v2.0.4-x64.exe}"
+CORE_SETUP="$BUILD_ROOT/EchoMusic-CoreSetup-v2.0.5.exe"
+OUT_EXE="${OUT_EXE:-$HOME/EchoMusic-Setup-v2.0.5-x64.exe}"
 DOTNET_BIN="${DOTNET_BIN:-dotnet}"
 SIGNTOOL_BIN="${SIGNTOOL_BIN:-signtool}"
 
@@ -22,6 +22,9 @@ rm -rf "$PUBLISH_DIR" "$SETUP_UI_DIR" "$BUILD_ROOT/obj" "$BUILD_ROOT/bin" \
   -p:MSBuildProjectExtensionsPath="$BUILD_ROOT/obj/" \
   -p:BaseOutputPath="$BUILD_ROOT/bin/" \
   --self-contained true \
+  -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:EnableCompressionInSingleFile=true \
   -p:DebugType=None \
   -p:DebugSymbols=false \
   -o "$PUBLISH_DIR"
@@ -90,7 +93,11 @@ fi
   -p:MSBuildProjectExtensionsPath="$BUILD_ROOT/setup-ui-obj/" \
   -p:BaseOutputPath="$BUILD_ROOT/setup-ui-bin/" \
   --self-contained true \
-  -p:PublishSingleFile=false \
+  -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:EnableCompressionInSingleFile=true \
+  -p:PublishTrimmed=true \
+  -p:TrimMode=link \
   -p:DebugType=None \
   -p:DebugSymbols=false \
   -o "$SETUP_UI_DIR"

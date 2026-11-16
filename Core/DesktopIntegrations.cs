@@ -592,7 +592,13 @@ public static class WebView2LoginHelper
 // =============================================================================
 public static class SingleInstanceIpc
 {
+#if DIRECT_RUN_TEST
+    // Isolate the direct test build from any installed Echo Music process. Without this distinct
+    // pipe, a test launch would hand activation to the old installed build and exit immediately.
+    private const string PipeName = "EchoMusicDesktop_DirectRunTest_v205";
+#else
     private const string PipeName = "EchoMusicDesktop_SingleInstance_v2";
+#endif
 
     public static bool TryForwardArgsToRunningInstance(string[] args)
     {
@@ -637,7 +643,11 @@ public static class SingleInstanceIpc
 
 public static class Win32TaskbarIconHelper
 {
+#if DIRECT_RUN_TEST
+    public const string AppUserModelId = "EchoMusic.Desktop.EmeraldWave.v205.Test";
+#else
     public const string AppUserModelId = "EchoMusic.Desktop.EmeraldWave.v20";
+#endif
 
     [StructLayout(LayoutKind.Sequential, Pack = 4)]
     private struct PropertyKey
@@ -863,7 +873,7 @@ public static class Win32TaskbarIconHelper
 
 public static class DynamicConfigService
 {
-    public const string CurrentAppVersion = "2.0.4";
+    public const string CurrentAppVersion = "2.0.5";
 
     public static void ApplyOverridesIfPresent(string dataDir)
     {

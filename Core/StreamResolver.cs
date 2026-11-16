@@ -46,9 +46,15 @@ public sealed class StreamResolver
         string videoId,
         bool preferWebmOpus = true,
         bool forceRefresh = false,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? qualityOverride = null,
+        bool requirePreferredCodec = false)
         => ResolveVerifiedCoreAsync(videoId, preferWebmOpus, forceRefresh, ct,
-            retryAfterGuestRefresh: true, visitorAlreadyRefreshed: false);
+            retryAfterGuestRefresh: true, visitorAlreadyRefreshed: false,
+            quality: NormalizeQuality(qualityOverride ?? _qualitySetting()),
+            requirePreferredCodec: requirePreferredCodec);
+
+    private static string NormalizeQuality(string? quality) => quality is "DataSaver" or "Normal" or "High" or "Best" ? quality : "Best";
 
     private async Task<ResolvedStreamResult> ResolveVerifiedCoreAsync(
         string videoId,
@@ -56,9 +62,11 @@ public sealed class StreamResolver
         bool forceRefresh,
         CancellationToken ct,
         bool retryAfterGuestRefresh,
-        bool visitorAlreadyRefreshed)
+        bool visitorAlreadyRefreshed,
+        string quality,
+        bool requirePreferredCodec)
     {
-        var cacheKey = $"{videoId}:{(preferWebmOpus ? "opus" : "mp4")}:{_qualitySetting()}";
+        var cacheKey = $"{videoId}:{(preferWebmOpus ? "opus" : "mp4")}:{quality}:{(requirePreferredCodec ? "strict" : "flexible")}";
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(3))
         {
             try
@@ -107,7 +115,7 @@ public sealed class StreamResolver
                 if (adaptive is null || adaptive.Count == 0) continue;
 
                 // Try preferred codec first (e.g. WebM/Opus), then fallback codec (e.g. MP4/AAC on Windows)
-                foreach (var chosen in RankCandidateFormats(adaptive, _qualitySetting(), preferWebmOpus))
+                foreach (var chosen in RankCandidateFormats(adaptive, quality, preferWebmOpus, requirePreferredCodec))
                 {
                     var url = chosen["url"]?.GetValue<string>();
                     if (string.IsNullOrEmpty(url)) continue;
@@ -201,7 +209,7 @@ public sealed class StreamResolver
                 var streams = json?["audioStreams"] as JsonArray;
                 if (streams is null || streams.Count == 0) continue;
 
-                var best = RankCandidateFormats(streams, _qualitySetting(), preferWebmOpus)
+                var best = RankCandidateFormats(streams, quality, preferWebmOpus, requirePreferredCodec)
                     .FirstOrDefault(s =>
                     {
                         var mime = s["mimeType"]?.GetValue<string>() ?? "";
@@ -247,7 +255,7 @@ public sealed class StreamResolver
                 && !string.Equals(previousVisitor, refreshedVisitor, StringComparison.Ordinal))
             {
                 return await ResolveVerifiedCoreAsync(videoId, preferWebmOpus, forceRefresh: true, ct: ct,
-                    retryAfterGuestRefresh: false, visitorAlreadyRefreshed: true);
+                    retryAfterGuestRefresh: false, visitorAlreadyRefreshed: true, quality: quality, requirePreferredCodec: requirePreferredCodec);
             }
         }
 
@@ -325,7 +333,22 @@ public sealed class StreamResolver
         };
     }
 
-    internal static List<JsonObject> RankCandidateFormats(JsonArray formats, string quality, bool preferWebmOpus)
+    private static bool IsPreferredCodecFormat(JsonObject format, bool preferWebmOpus)
+    {
+        string mime = format["mimeType"]?.GetValue<string>() ?? "";
+        string codec = format["codec"]?.GetValue<string>() ?? "";
+        if (preferWebmOpus)
+            return mime.Contains("webm", StringComparison.OrdinalIgnoreCase)
+                && (mime.Contains("opus", StringComparison.OrdinalIgnoreCase)
+                    || codec.Contains("opus", StringComparison.OrdinalIgnoreCase)
+                    || string.IsNullOrWhiteSpace(codec));
+        return mime.Contains("mp4", StringComparison.OrdinalIgnoreCase)
+            || mime.Contains("aac", StringComparison.OrdinalIgnoreCase)
+            || codec.Contains("mp4a", StringComparison.OrdinalIgnoreCase)
+            || codec.Contains("aac", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static List<JsonObject> RankCandidateFormats(JsonArray formats, string quality, bool preferWebmOpus, bool requirePreferredCodec = false)
     {
         int ceiling = quality switch
         {
@@ -345,10 +368,19 @@ public sealed class StreamResolver
             candidates.Add(f);
         }
 
+        // AudioEngine's parallel Windows codec race must resolve genuinely distinct codec families.
+        // Otherwise a DataSaver ceiling can leave only AAC and the nominal WebM/Opus attempt also
+        // resolves AAC, so both decks fail identically. Strict callers search all client profiles
+        // for the requested family; the other racer resolves the alternate family independently.
+        if (requirePreferredCodec)
+        {
+            candidates = candidates.Where(f => IsPreferredCodecFormat(f, preferWebmOpus)).ToList();
+            if (candidates.Count == 0) return new List<JsonObject>();
+        }
+
         // Honor the platform's decoder preference first (Media Foundation AAC on Windows,
         // managed WebM/Opus elsewhere), then apply the requested bitrate ceiling within that
-        // codec family. This avoids selecting a slightly higher-rate codec the active platform
-        // decoder cannot actually turn into samples.
+        // codec family.
         var withinCeiling = candidates
             .Where(f => (f["bitrate"]?.GetValue<int>() ?? 0) <= ceiling)
             .ToList();

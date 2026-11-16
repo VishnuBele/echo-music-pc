@@ -3,6 +3,8 @@ using Avalonia.Controls;
 using EchoMusic.Core;
 using EchoMusic.UI;
 using NAudio.Wave;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace EchoMusic;
 
@@ -11,6 +13,16 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+#if DIRECT_RUN_TEST
+        if (OperatingSystem.IsWindows() && HasOtherEchoMusicProcess())
+        {
+            MessageBoxW(IntPtr.Zero,
+                "Another Echo Music process is still running (possibly minimized to the system tray). Exit the old app completely, then start this test build again; otherwise you may hear audio from the old copy.",
+                "Close the old Echo Music before testing",
+                0x00000030u /* MB_ICONWARNING */ | 0x00000000u /* MB_OK */);
+            return 2;
+        }
+#endif
         Win32TaskbarIconHelper.RegisterFreshAppUserModelId();
 
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
@@ -53,6 +65,26 @@ public static class Program
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
+
+#if DIRECT_RUN_TEST
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "MessageBoxW")]
+    private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
+
+    private static bool HasOtherEchoMusicProcess()
+    {
+        try
+        {
+            foreach (var process in Process.GetProcessesByName("EchoMusic"))
+            {
+                using (process)
+                    if (process.Id != Environment.ProcessId) return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+#endif
+
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
@@ -61,7 +93,7 @@ public static class Program
 
     private static async Task<int> RunHeadlessSelfTestAsync()
     {
-        Console.WriteLine("=== Echo Music v2.0.4 Native Engine End-to-End Self-Test ===");
+        Console.WriteLine("=== Echo Music v2.0.5 Native Engine End-to-End Self-Test ===");
 
         var spotifyMatchProbe = MusicDnaAndExtras.PickSpotifyMatch(
             ("Safe Title", "Correct Artist", 200_000),
@@ -109,6 +141,12 @@ public static class Program
             && StreamResolver.RankCandidateFormats(codecFixture, "Auto", preferWebmOpus: true).First()["mimeType"]?.GetValue<string>()?.Contains("audio/webm", StringComparison.OrdinalIgnoreCase) == true;
         Console.WriteLine($"[platform-codec-preference] Windows can prefer native AAC while WebM/Opus remains explicitly selectable={nativeCodecPreferenceCorrect}");
         if (!nativeCodecPreferenceCorrect) return 27;
+        var lowAacOnlyFixture = System.Text.Json.Nodes.JsonNode.Parse("""[{"mimeType":"audio/mp4; codecs=\"mp4a.40.5\"","bitrate":50476,"url":"https://example.invalid/aac-low"}]""")!.AsArray();
+        bool strictCodecRaceDoesNotLabelAacAsOpus = StreamResolver.RankCandidateFormats(lowAacOnlyFixture, "DataSaver", preferWebmOpus: true, requirePreferredCodec: true).Count == 0
+            && StreamResolver.RankCandidateFormats(codecFixture, "Best", preferWebmOpus: true, requirePreferredCodec: true).All(f => (f["mimeType"]?.GetValue<string>() ?? "").Contains("webm", StringComparison.OrdinalIgnoreCase))
+            && StreamResolver.RankCandidateFormats(codecFixture, "Best", preferWebmOpus: false, requirePreferredCodec: true).All(f => (f["mimeType"]?.GetValue<string>() ?? "").Contains("mp4", StringComparison.OrdinalIgnoreCase));
+        Console.WriteLine($"[strict-codec-selection] AAC-only formats are rejected by the Opus attempt; codec racers resolve distinct families={strictCodecRaceDoesNotLabelAacAsOpus}");
+        if (!strictCodecRaceDoesNotLabelAacAsOpus) return 41;
 
         byte[] rangeFixture = Enumerable.Range(0, 1024).Select(i => (byte)(i % 251)).ToArray();
         var transientRangeHandler = new SelfTestRangeHandler(rangeFixture, failFirstRequests: 1);
@@ -299,6 +337,19 @@ public static class Program
         bool hasPodcastChip = home.MoodChips.Any(c => c.Title.Contains("Podcast", StringComparison.OrdinalIgnoreCase) || c.Title.Contains("Uploaded", StringComparison.OrdinalIgnoreCase));
         Console.WriteLine($"[3/10] Extended PC Home shelves={home.Shelves.Count}, moodChips={home.MoodChips.Count} ({string.Join(", ", home.MoodChips.Select(c => c.Title))}), hasPodcastChip={hasPodcastChip}, hasNextContinuation={!string.IsNullOrEmpty(home.Continuation)}");
         if (home.Shelves.Count < 6 || hasPodcastChip) return 2;
+        var testMood = home.MoodChips.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.Params));
+        if (testMood is not null)
+        {
+            var moodFeed = await yt.GetHomeAsync(testMood.Params, moodBrowseId: testMood.BrowseId);
+            int homeTrackCount = home.Shelves.Sum(s => s.Tracks.Count);
+            int moodTrackCount = moodFeed.Shelves.Sum(s => s.Tracks.Count);
+            int sharedTracks = home.Shelves.SelectMany(s => s.Tracks).Select(t => t.Id)
+                .Intersect(moodFeed.Shelves.SelectMany(s => s.Tracks).Select(t => t.Id), StringComparer.Ordinal).Count();
+            bool moodRequestReturnedContent = moodFeed.Shelves.Count > 0 && (moodTrackCount > 0 || moodFeed.Shelves.Any(s => s.Cards.Count > 0));
+            Console.WriteLine($"[mood-chip-browse] chip='{testMood.Title}', shelves={moodFeed.Shelves.Count}, tracks={moodTrackCount}, overlapWithHome={sharedTracks}/{Math.Max(homeTrackCount,moodTrackCount)}, contentReturned={moodRequestReturnedContent}");
+            if (!moodRequestReturnedContent) return 17;
+        }
+        else Console.WriteLine("[mood-chip-browse] no parameterized Home mood chip returned; mood route not exercised");
         var exploreCharts = await yt.GetExploreAndChartsAsync();
         var topSongChart = exploreCharts.FirstOrDefault(s => s.Title == "Top Songs Chart");
         Console.WriteLine($"[top-100-chart] region={yt.RegionGl}, playableChartTracks={topSongChart?.Tracks.Count ?? 0}");

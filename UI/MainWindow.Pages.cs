@@ -1627,11 +1627,11 @@ public partial class MainWindow
             return s.AmbientReverb ? $"{(int)(s.ReverbMix * 100)}%" : "Off";
         }));
 
-        dspStack.Children.Add(BuildLabeledSlider("Equal-Power Crossfade", s.CrossfadeSeconds == 0 ? "Off (Gapless)" : $"{s.CrossfadeSeconds} sec", 0, 12, s.CrossfadeSeconds, v =>
+        dspStack.Children.Add(BuildLabeledSlider("Track-to-track crossfade", s.CrossfadeSeconds == 0 ? "Off" : $"{s.CrossfadeSeconds} sec", 0, 12, s.CrossfadeSeconds, v =>
         {
             s.CrossfadeSeconds = (int)Math.Round(v);
             _store.SaveDebounced();
-            return s.CrossfadeSeconds == 0 ? "Off (Gapless)" : $"{s.CrossfadeSeconds} sec";
+            return s.CrossfadeSeconds == 0 ? "Off" : $"{s.CrossfadeSeconds} sec";
         }));
 
         dspCard.Child = dspStack;
@@ -2046,12 +2046,35 @@ public partial class MainWindow
             s.GaplessPreload = v;
             _store.SaveDebounced();
         }));
-        audioCard.Children.Add(BuildToggleRow("Echo Brain Autoplay", "Automatically continue playing smart recommendations when queue ends", s.AutoplayEchoBrain, v =>
+        audioCard.Children.Add(BuildToggleRow("Echo Brain Autoplay", "Continue smart recommendations when a queue ends", s.AutoplayEchoBrain, v =>
         {
             s.AutoplayEchoBrain = v;
             _store.SaveDebounced();
         }));
-        root.Children.Add(WrapSettingsCard(audioCard, "audio streaming quality loudness normalization gapless preload autoplay echo brain"));
+        audioCard.Children.Add(BuildChoiceRow("When Play is pressed while idle", new[]
+        {
+            ("DoNothing", "Do nothing"),
+            ("ResumeLast", "Play last song before closing"),
+        }, s.IdlePlayBehavior, v =>
+        {
+            s.IdlePlayBehavior = v;
+            _store.SaveDebounced();
+            RenderSettingsView();
+        }));
+        audioCard.Children.Add(BuildToggleRow("Skip a track after two playback errors", "On: if both codec attempts fail for a song, automatically continue to the next queued track instead of stopping on it.", s.SkipFailedTracksAfterTwoErrors, v =>
+        {
+            s.SkipFailedTracksAfterTwoErrors = v;
+            _store.SaveDebounced();
+        }));
+        audioCard.Children.Add(new TextBlock
+        {
+            Text = "This affects an explicit Play click only; it never starts music automatically when the app opens.",
+            FontSize = 12,
+            Foreground = ResBrush("TextSecondaryBrush"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, -8, 0, 0),
+        });
+        root.Children.Add(WrapSettingsCard(audioCard, "audio streaming quality loudness normalization gapless preload autoplay echo brain idle play last song resume startup skip failed errors"));
 
         // Discovery exclusions: reversible per-song, album, and artist blocks follow the mobile app's content controls.
         var contentCard = new StackPanel { Spacing = 14 };
