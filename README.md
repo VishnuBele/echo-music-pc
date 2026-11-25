@@ -23,7 +23,6 @@ Echo Music PC brings music discovery, streaming, synced lyrics, local listening 
 
 Built for the desktop: a proper library, a queue, keyboard shortcuts, a mini-player, a full-screen player and audio controls that go well beyond play and pause.
 
-> **v2.0.5 source update:** The `main` branch contains v2.0.5 and its Windows/Linux packages have been built. The GitHub Releases page still lists v2.0.4 as the latest published release; v2.0.5 is not downloadable from Releases until its release and assets are published.
 
 ## Explore what you can do
 
